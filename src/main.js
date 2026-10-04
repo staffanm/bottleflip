@@ -133,8 +133,14 @@ function finish(){
 function coast(b){b.coastT=(b.coastT||0)+DT;
   if(b.outcome==='flop'){b.done=false;step(b);b.done=true;b.outcome='flop';}
   else{const tx=b.fny,ty=-b.fnx,dv=b.mu*G*DT;let vt=b.vx*tx+b.vy*ty;vt=Math.abs(vt)<=dv?0:vt-Math.sign(vt)*dv;
-    b.vx=vt*tx;b.vy=vt*ty;b.w=0;b.x+=b.vx*DT;b.y+=b.vy*DT;b.t+=DT;}
-  if(b.coastT>8||(Math.hypot(b.vx,b.vy)<.005&&Math.abs(b.w)<.02))b.rested=true;}
+    b.vx=vt*tx;b.vy=vt*ty;b.w=0;b.x+=b.vx*DT;b.y+=b.vy*DT;b.t+=DT;
+    // the verdict counts a lean of up to about 20 degrees as standing: ease it square onto its base (or its cap)
+    const lowest=()=>{const c=Math.cos(b.th),si=Math.sin(b.th);let m=1e9;for(const[vx,vy]of b.verts){const dn=(b.x+c*vx-si*vy)*b.fnx+(b.y+si*vx+c*vy)*b.fny;if(dn<m)m=dn;}return m;};
+    if(b.restDn===undefined)b.restDn=lowest(); // keep the contact depth the bottle had at the verdict (it matters on the trampoline)
+    let d=(b.th-b.phi-(b.outcome==='cap'?Math.PI:0))%(2*Math.PI);if(d>Math.PI)d-=2*Math.PI;if(d<-Math.PI)d+=2*Math.PI;
+    b.th-=d*Math.min(1,8*DT);b.lean=Math.abs(d);
+    const m=lowest()-b.restDn;b.x-=m*b.fnx;b.y-=m*b.fny;}
+  if(b.coastT>8||(Math.hypot(b.vx,b.vy)<.005&&Math.abs(b.w)<.02&&!(b.lean>1e-3)))b.rested=true;}
 function frame(ts){
   requestAnimationFrame(frame);
   const dtReal=Math.min(.05,(ts-last)/1000||0);last=ts;
