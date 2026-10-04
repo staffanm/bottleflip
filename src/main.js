@@ -127,10 +127,15 @@ function finish(){
   });
 }
 
+// After the verdict the bottle keeps moving (a slide on ice, a roll after a flop) until it comes to rest.
+// The outcome is already decided and stays as it is.
+function coast(b){const o=b.outcome;b.done=false;step(b);b.done=true;b.outcome=o;b.coastT=(b.coastT||0)+DT;
+  if(b.coastT>8||(Math.hypot(b.vx,b.vy)<.005&&Math.abs(b.w)<.02))b.rested=true;}
 function frame(ts){
   requestAnimationFrame(frame);
   const dtReal=Math.min(.05,(ts-last)/1000||0);last=ts;
   if(running){acc+=dtReal*(slow?.2:1);let steps=0;while(acc>=DT&&steps<40){step(bottle);acc-=DT;steps++;if(bottle.done){finish();acc=0;break;}}if(running&&bottle.touched)$('hudS').textContent='settling';}
+  else if(bottle&&bottle.done&&!bottle.rested){acc+=dtReal*(slow?.2:1);let steps=0;while(acc>=DT&&steps<40){coast(bottle);acc-=DT;steps++;}}
   if(confetti){confT+=dtReal;for(const q of confetti){q.vy+=2.2*dtReal;q.x+=q.vx*dtReal;q.y+=q.vy*dtReal;q.r+=3*dtReal;}if(confT>3)confetti=null;}
   draw(dtReal);
 }
@@ -195,8 +200,9 @@ function draw(dt){
   const gb=ctx.createLinearGradient(-R,0,R,0);gb.addColorStop(0,'rgba(255,255,255,.55)');gb.addColorStop(.35,'rgba(255,255,255,.25)');gb.addColorStop(.6,'rgba(220,230,240,.35)');gb.addColorStop(1,'rgba(180,195,215,.45)');
   bottlePath();ctx.fillStyle=gb;ctx.fill();
   // water: sloshing particle field in flight, blending into a hydrostatic level pool as it comes to rest
-  {const calm=!running||b.done||(b.touched&&b.stable&&(b.rel||0)<.15&&Math.abs(b.w)<1&&Math.hypot(b.vx,b.vy)<.1);
-   levelMix+=((calm?1:0)-levelMix)*Math.min(1,dt*(calm?3:8));if(!running)levelMix=1;
+  // calm means the water moves with the bottle; the bottle itself may still slide
+  {const idle=!running&&!b.touched,calm=idle||b.done||(b.touched&&b.stable&&(b.rel||0)<.15&&Math.abs(b.w)<1);
+   levelMix+=((calm?1:0)-levelMix)*Math.min(1,dt*(calm?3:8));if(idle)levelMix=1;
    if(levelMix<.995){const fl=renderFluid(b,scale);if(fl){ctx.save();ctx.globalAlpha=1-levelMix;bottlePath();ctx.clip();ctx.scale(1,-1);ctx.drawImage(fl,-R,-h,2*R,h);ctx.restore();}}
    if(levelMix>.005&&b.parts.length){ctx.save();ctx.globalAlpha=levelMix;bottlePath();ctx.clip();drawLevelPool(b,ox,oy,scale,lw);ctx.restore();}}
   // shell outline + highlights
@@ -218,10 +224,29 @@ function draw(dt){
   if(confetti){for(const q of confetti){ctx.save();ctx.translate(q.x*W,q.y*H);ctx.rotate(q.r);ctx.fillStyle=q.c;ctx.fillRect(-4*dpr,-2.5*dpr*q.w,8*dpr,5*dpr*q.w);ctx.restore();}}
   if(finale)drawFinale(dt,W,H,dpr);
 }
+// Slosh of the settled water: the surface tilts towards the effective gravity (gravity minus the bottle's acceleration)
+// and swings about it as a damped oscillator at the first slosh mode of a cylinder. Drawing only; the physics never reads it.
+function updateSlosh(b){
+  const s=b.slosh||(b.slosh={a:0,w:0,vx:b.vx,vy:b.vy,t:b.t,ax:0,ay:0});
+  const dt=b.t-s.t;if(dt<=0)return s;
+  const lim=3*G,ax=Math.max(-lim,Math.min(lim,(b.vx-s.vx)/dt)),ay=Math.max(-lim,Math.min(lim,(b.vy-s.vy)/dt));
+  s.vx=b.vx;s.vy=b.vy;s.t=b.t;
+  if(!b.touched){s.a=0;s.w=0;s.ax=0;s.ay=0;return s;} // in free fall the water has no down
+  // smooth the acceleration over 0.15 s so that small contact jitter on the surface does not keep the water rocking
+  const k=Math.min(1,dt/.15);s.ax+=(ax-s.ax)*k;s.ay+=(ay-s.ay)*k;
+  const target=Math.max(-.6,Math.min(.6,Math.atan2(s.ax,G+s.ay)));
+  const D=2*b.Ri,hw=Math.max(.005,(b.params?b.params.fill:.33)*b.h),om=Math.sqrt(Math.PI*G/D*Math.tanh(Math.PI*hw/D)),z=.06;
+  const n=Math.ceil(dt*om*8),hs=dt/n;
+  for(let i=0;i<n;i++){s.w+=(-om*om*(s.a-target)-2*z*om*s.w)*hs;s.a+=s.w*hs;}
+  s.a=Math.max(-.7,Math.min(.7,s.a));
+  return s;
+}
 function drawLevelPool(b,ox,oy,scale,lw){
   const c=Math.cos(b.th),si=Math.sin(b.th);
   const loc=[[-b.Ri,-b.cy],[b.Ri,-b.cy],[b.Ri,b.hs-b.cy],[b.Rn,b.h-b.cy],[-b.Rn,b.h-b.cy],[-b.Ri,b.hs-b.cy]];
-  const poly=loc.map(([lx,ly])=>[b.x+c*lx-si*ly,b.y+si*lx+c*ly]);
+  // work in a frame centred on the bottle and turned so that the sloshing surface is level
+  const al=updateSlosh(b).a,ca=Math.cos(al),sa=Math.sin(al);
+  const poly=loc.map(([lx,ly])=>{const x=c*lx-si*ly,y=si*lx+c*ly;return[ca*x-sa*y,sa*x+ca*y];});
   const area=P=>{let a=0;for(let i=0;i<P.length;i++){const[x1,y1]=P[i],[x2,y2]=P[(i+1)%P.length];a+=x1*y2-x2*y1;}return Math.abs(a)/2;};
   const clipBelow=(P,yl)=>{const out=[];for(let i=0;i<P.length;i++){const A=P[i],B=P[(i+1)%P.length];const ina=A[1]<=yl,inb=B[1]<=yl;
     if(ina)out.push(A);if(ina!==inb){const t=(yl-A[1])/(B[1]-A[1]);out.push([A[0]+t*(B[0]-A[0]),yl]);}}return out;};
@@ -229,7 +254,7 @@ function drawLevelPool(b,ox,oy,scale,lw){
   let lo=Math.min(...poly.map(p=>p[1])),hi=Math.max(...poly.map(p=>p[1]));
   for(let i=0;i<22;i++){const mid=(lo+hi)/2;if(area(clipBelow(poly,mid))<target)lo=mid;else hi=mid;}
   const yl=(lo+hi)/2,pool=clipBelow(poly,yl);if(pool.length<3)return;
-  ctx.setTransform(1,0,0,1,0,0);ctx.translate(ox,oy);ctx.scale(scale,-scale);
+  ctx.setTransform(1,0,0,1,0,0);ctx.translate(ox,oy);ctx.scale(scale,-scale);ctx.translate(b.x,b.y);ctx.rotate(-al);
   const g=ctx.createLinearGradient(0,yl,0,Math.min(...pool.map(p=>p[1])));g.addColorStop(0,'rgba(33,133,222,.78)');g.addColorStop(1,'rgba(20,100,190,.9)');
   ctx.beginPath();pool.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fillStyle=g;ctx.fill();
   // meniscus line
@@ -240,15 +265,17 @@ function drawSurface(b,W,H,dpr,scale,ox,oy){
   if(oy>H+200)return;
   // draw in the surface's own frame: origin at the world origin on the surface, x along the slope, y into the ground
   ctx.save();ctx.translate(ox,oy);ctx.rotate(-b.phi);
-  const bx=(b.x*b.fny-b.y*b.fnx)*scale;const X0=-2*W,X1=3*W;oy=0;W=X1-X0;
+  // cover the visible screen, wherever the camera is: after a long throw in zoom the world origin is far off screen
+  const bx=(b.x*b.fny-b.y*b.fnx)*scale;const Wc=W,X0=-ox-2*Wc,X1=-ox+3*Wc;oy=0;W=X1-X0;
+  const span_=(st,f)=>{for(let i=Math.floor(X0/st);i<=Math.ceil(X1/st);i++)f(i);};
   const fillBand=(y0,h2,style)=>{ctx.fillStyle=style;ctx.fillRect(X0,y0,W,h2);};
   if(surface==='trampoline'){
-    const sag=-Math.max(0,Math.min(.08,-(b.x*b.fnx+b.y*b.fny+minVertexY(b))))*scale;const span=W/5*.25;
+    const sag=-Math.max(0,Math.min(.08,-(b.x*b.fnx+b.y*b.fny+minVertexY(b))))*scale;const span=Wc/4;
     fillBand(12*dpr,H*3,'#cfc4ad');
-    ctx.fillStyle='#6b645a';for(let i=-10;i<=15;i++)ctx.fillRect(i*(W/25)-4*dpr,8*dpr,8*dpr,H*3);
+    ctx.fillStyle='#6b645a';span_(Wc/5,i=>ctx.fillRect(i*(Wc/5)-4*dpr,8*dpr,8*dpr,H*3));
     ctx.strokeStyle='#8a8276';ctx.lineWidth=1.5*dpr;
-    for(let i=-25;i<=45;i++){const x=(i+.5)*(W/70),s2=Math.max(0,1-Math.abs(x-bx)/span),dy=-sag*s2;
-      ctx.beginPath();ctx.moveTo(x,10*dpr);for(let k=1;k<=5;k++)ctx.lineTo(x+(k%2?5:-5)*dpr,10*dpr-dy*(1-k/5)-(k/5)*8*dpr);ctx.stroke();}
+    span_(Wc/14,i=>{const x=(i+.5)*(Wc/14),s2=Math.max(0,1-Math.abs(x-bx)/span),dy=-sag*s2;
+      ctx.beginPath();ctx.moveTo(x,10*dpr);for(let k=1;k<=5;k++)ctx.lineTo(x+(k%2?5:-5)*dpr,10*dpr-dy*(1-k/5)-(k/5)*8*dpr);ctx.stroke();});
     const prof=x=>-sag*Math.sin(Math.max(0,1-Math.abs(x-bx)/span)*Math.PI/2);
     ctx.beginPath();ctx.moveTo(X0,0);for(let x=X0;x<=X1;x+=8*dpr)ctx.lineTo(x,prof(x));ctx.lineTo(X1,6*dpr);ctx.lineTo(X0,6*dpr);ctx.closePath();ctx.fillStyle='#1c1a17';ctx.fill();
     ctx.strokeStyle='#0f766e';ctx.lineWidth=2.5*dpr;ctx.beginPath();let f0=true;for(let x=X0;x<=X1;x+=8*dpr){const y=prof(x);f0?ctx.moveTo(x,y):ctx.lineTo(x,y);f0=false;}ctx.stroke();
@@ -259,7 +286,7 @@ function drawSurface(b,W,H,dpr,scale,ox,oy){
   fillBand(0,3*dpr,look[2]);
   if(surface==='table'){ctx.strokeStyle='rgba(0,0,0,.18)';ctx.lineWidth=1*dpr;ctx.beginPath();for(let i=1;i<6;i++){ctx.moveTo(X0,i*7*dpr+3*dpr);ctx.lineTo(X1,i*7*dpr+3*dpr);}ctx.stroke();}
   else if(surface==='carpet'){ctx.fillStyle='rgba(255,255,255,.08)';for(let x=X0;x<X1;x+=7*dpr)ctx.fillRect(x,6*dpr+(Math.abs(Math.round(x/(7*dpr)))%2)*5*dpr,3*dpr,3*dpr);}
-  else if(surface==='ice'){ctx.fillStyle='rgba(255,255,255,.45)';for(let i=-10;i<25;i++)ctx.fillRect(i*(W/35),(8+(i%5)*6)*dpr,W/70,1.5*dpr);}
+  else if(surface==='ice'){ctx.fillStyle='rgba(255,255,255,.45)';span_(Wc/7,i=>ctx.fillRect(i*(Wc/7),(8+(((i%5)+5)%5)*6)*dpr,Wc/14,1.5*dpr));}
   // reflection of the bottle on hard surfaces (mirrored across the surface plane)
   if(surface!=='carpet'){const dn=b.x*b.fnx+b.y*b.fny;ctx.save();ctx.globalAlpha=surface==='ice'?.22:.08;ctx.scale(scale,scale);ctx.translate(bx/scale,dn);ctx.rotate(-(b.th-b.phi));ctx.translate(0,-b.cy);
     ctx.fillStyle='#38bdf8';ctx.beginPath();ctx.rect(-b.R,0,2*b.R,b.h);ctx.fill();ctx.restore();}
@@ -327,7 +354,8 @@ let pressTimer=null,pressX=0,pressY=0;
 function cancelPress(){if(pressTimer){clearTimeout(pressTimer);pressTimer=null;}}
 function armPress(target,fire){
   target.addEventListener('contextmenu',e=>e.preventDefault());
-  target.addEventListener('pointerdown',e=>{cancelPress();pressX=e.clientX;pressY=e.clientY;
+  target.addEventListener('pointerdown',e=>{cancelPress();if(level.n>1)return; // the lab only helps on level 1
+    pressX=e.clientX;pressY=e.clientY;
     pressTimer=setTimeout(()=>{pressTimer=null;if(navigator.vibrate)navigator.vibrate(20);fire();},550);});
   target.addEventListener('pointermove',e=>{if(Math.hypot(e.clientX-pressX,e.clientY-pressY)>10)cancelPress();});
   for(const ev of['pointerup','pointercancel','pointerleave'])target.addEventListener(ev,cancelPress);
