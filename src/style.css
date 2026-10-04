@@ -23,6 +23,9 @@ h1,h2,button,.val,.verdict,.score-big,.hud span,.lvl{font-family:"Space Grotesk"
 canvas{display:block;width:100%;height:100%;touch-action:manipulation}
 .hud{position:absolute;left:10px;top:10px;display:flex;gap:6px;flex-wrap:wrap;pointer-events:none;z-index:2}
 .hud span{background:rgba(255,253,248,.82);color:var(--ink);border:1px solid var(--line-2);border-radius:6px;padding:3px 9px;font-weight:600;font-size:12px;letter-spacing:.02em;box-shadow:0 1px 2px rgba(60,40,10,.08)}
+/* fixed widths and equal-width digits, so the chips do not change size while the numbers run */
+.hud span{font-variant-numeric:tabular-nums;text-align:center}
+#hudT{min-width:5.4em}#hudF{min-width:7em}#hudS{min-width:6.3em}
 .hud .challenge{background:var(--gold);border-color:var(--gold);color:#fff}
 .title{position:absolute;right:12px;top:8px;text-align:right;pointer-events:none;color:var(--ink);z-index:2}
 .title h1{margin:0;font-size:18px;font-weight:700;line-height:1;letter-spacing:.01em}
@@ -129,3 +132,7 @@ canvas{display:block;width:100%;height:100%;touch-action:manipulation}
 /* narrow phones: the toggles show their state by colour only */
 @media (max-width:379px){.toggle .knob{display:none}.toggle{padding:5px 8px}}
 @media (max-width:339px){.actionbar{flex-wrap:wrap}}
+/* narrow screens: the chips take the top line, so the title moves under them */
+@media (max-width:519px){.title{top:40px}.title h1{font-size:15px}.title p{display:none}}
+/* phones: the About box covers the game area and the controls, so its text fits without scrolling */
+@media (max-width:859px){.about{position:fixed;inset:calc(10px + env(safe-area-inset-top,0px)) 10px calc(10px + env(safe-area-inset-bottom,0px));z-index:10;background:var(--panel)}}
