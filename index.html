@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f1e7">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Bottle Flip">
+<title>Bottle Flip Simulator</title>
+<meta name="description" content="Deterministic water-bottle flip simulator with real fluid-shell physics, a ten-level ladder, and shareable challenge links.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Bottle flip challenge — can you beat it?">
+<meta property="og:description" content="Someone landed a bottle flip in the Bottle Flip Simulator and wants you to beat their score. Same physics, same bottle, same throw: open the link and tune the settings to out-score them.">
+<meta property="og:url" content="https://bottleflip.tomtebo.org/">
+<meta property="og:image" content="https://bottleflip.tomtebo.org/icon-512.png">
+<meta name="twitter:card" content="summary">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+</head>
+<body>
+<body>
+<div class="app">
+  <section class="stage" aria-label="Simulation">
+    <canvas id="c" aria-label="Bottle flip animation"></canvas>
+    <div class="hud"><span id="hudT">0.00 s</span><span id="hudF">0.0 flips</span><span id="hudS">ready</span><span id="hudC" class="challenge" hidden></span></div>
+    <div class="title"><h1>Bottle Flip Simulator</h1><p>Real fluid physics. No mop required.</p></div>
+    <div class="result" id="result">
+      <div class="verdict" id="verdict"></div>
+      <h2 id="rTitle"></h2>
+      <div><span class="score-big" id="rScore"></span><span class="stars" id="rStars"></span></div>
+      <div class="chips" id="rChips"></div>
+      <p class="best" id="rBest"></p>
+      <div class="share"><button class="btn quiet" id="share" hidden>Share this flip</button><span id="shareNote"></span></div>
+    </div>
+    <div class="about" id="aboutBox" hidden>
+      <h2>How it works</h2>
+      <p>The bottle is a rigid shell with a cap; the water is a set of particles coupled to it through momentum-conserving contacts, so the spin really does slow as the water shifts, and the landing really is cushioned by the slosh. Fixed time step, no randomness, and its own bit-exact sine and cosine, so the same settings give the same flip in every browser.</p>
+      <p>Scoring starts at 100 for the reference flip (the defaults with spin eased back to 3.4) and climbs steeply the less wiggle room your settings leave: after a landing the lab nudges every setting until the flip turns into a flop, and the tightest tolerance sets the multiplier. Fast spins, lanky bottles, fill away from a third, high drops, speed, trampoline or ice, landing on the cap, and higher levels all multiply it further.</p>
+      <p>Land your first flip and a ten-level ladder appears; each level you clear unlocks the next. Positive spin sends the cap backwards (a normal flip). Long-press any setting, or the Surface heading, and the lab dials it to the nearest value that lands. Space bar flips.</p>
+      <p>Got a flip code from a friend? Paste it here.</p>
+      <div class="codebox"><input id="codeIn" type="text" inputmode="text" placeholder="F…  (19-character flip code)" aria-label="Flip code"><button type="button" class="btn quiet" id="codeGo">Load flip</button></div>
+      <p class="dismiss">Tap outside the box to close</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="controls">
+      <div id="levelBox" hidden>
+      <h2>Level</h2>
+      <div class="levels" id="levels"></div>
+      <p class="ldesc" id="ldesc"></p>
+      </div>
+      <h2>Bottle <span class="presets" id="presets">
+        <button data-p="classic">Classic 500 ml</button><button data-p="tall">Tall boy</button><button data-p="stubby">Stubby</button><button data-p="jug">Big jug</button></span></h2>
+      <div class="grid">
+        <div class="row"><label for="h">Height</label><span class="val" id="hV"></span><span class="nudge"><button type="button" data-id="h" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="h" data-n="1" aria-label="increase">+</button></span><input type="range" id="h" min="10" max="40" step="0.1" value="22"></div>
+        <div class="row"><label for="d">Diameter</label><span class="val" id="dV"></span><span class="nudge"><button type="button" data-id="d" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="d" data-n="1" aria-label="increase">+</button></span><input type="range" id="d" min="4" max="12" step="0.05" value="6.5"></div>
+        <div class="row"><label for="f">Water fill</label><span class="val" id="fV"></span><span class="nudge"><button type="button" data-id="f" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="f" data-n="1" aria-label="increase">+</button></span><input type="range" id="f" min="0" max="100" step="0.5" value="33"></div>
+        <div class="row"><label for="drop">Height above surface</label><span class="val" id="dropV"></span><span class="nudge"><button type="button" data-id="drop" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="drop" data-n="1" aria-label="increase">+</button></span><input type="range" id="drop" min="0" max="150" step="0.5" value="20"></div>
+      </div>
+      <h2>Throw</h2>
+      <div class="grid">
+        <div class="row"><label for="v">Speed</label><span class="val" id="vV"></span><span class="nudge"><button type="button" data-id="v" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="v" data-n="1" aria-label="increase">+</button></span><input type="range" id="v" min="0" max="6" step="0.01" value="2.8"></div>
+        <div class="row"><label for="a">Launch angle</label><span class="val" id="aV"></span><span class="nudge"><button type="button" data-id="a" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="a" data-n="1" aria-label="increase">+</button></span><input type="range" id="a" min="40" max="140" step="0.5" value="82"></div>
+        <div class="row"><label for="s">Spin</label><span class="val" id="sV"></span><span class="nudge"><button type="button" data-id="s" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="s" data-n="1" aria-label="increase">+</button></span><input type="range" id="s" min="-6" max="6" step="0.01" value="3.7"></div>
+        <div class="row"><label for="tilt">Release tilt</label><span class="val" id="tiltV"></span><span class="nudge"><button type="button" data-id="tilt" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="tilt" data-n="1" aria-label="increase">+</button></span><input type="range" id="tilt" min="-60" max="60" step="0.5" value="0"></div>
+      </div>
+      <h2><span id="surfLabel">Surface</span> <span class="surfaces" id="surfaces">
+        <button data-s="table" class="on">Table</button><button data-s="trampoline">Trampoline</button><button data-s="carpet">Carpet</button><button data-s="ice">Ice</button></span></h2>
+      <div class="grid">
+        <div class="row"><label for="slope">Surface tilt</label><span class="val" id="slopeV"></span><span class="nudge"><button type="button" data-id="slope" data-n="-1" aria-label="decrease">−</button><button type="button" data-id="slope" data-n="1" aria-label="increase">+</button></span><input type="range" id="slope" min="-10" max="10" step="0.5" value="0"></div>
+      </div>
+      <div class="actionbar">
+        <button class="btn" id="flip">Flip it</button>
+        <div class="toggles">
+          <button class="toggle" id="slow" role="switch" aria-checked="false"><span class="knob"></span><span class="tl">Slow-mo</span></button>
+          <button class="toggle" id="zoom" role="switch" aria-checked="false"><span class="knob"></span><span class="tl">Zoom</span></button>
+        </div>
+        <button class="btn quiet" id="reset">Reset</button>
+        <button class="btn quiet" id="about" aria-expanded="false">About</button>
+      </div>
+    </div>
+  </section>
+</div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
