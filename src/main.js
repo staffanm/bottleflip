@@ -7,17 +7,18 @@ import '@fontsource/space-grotesk/600.css';
 import '@fontsource/space-grotesk/700.css';
 import './style.css';
 import {G,DT,makeBottle,step,difficulty,LEVELS,levelPasses} from './sim.js';
+import {runThrow,cancelQueued} from './simpool.js';
 
 // ---------- UI, levels, rendering ----------
 const $=id=>document.getElementById(id);
 const ids=['h','d','f','v','a','s','tilt','drop','slope'];
 const BASE={h:[10,40],d:[4,12],f:[0,100],v:[0,6],a:[40,140],s:[-6,6],tilt:[-60,60],drop:[0,150],slope:[-10,10]};
 const fmt={h:x=>(+x).toFixed(1)+' cm',d:x=>(+x).toFixed(2)+' cm',f:x=>(+x).toFixed(1)+' %',v:x=>(+x).toFixed(2)+' m/s',a:x=>(+x).toFixed(1)+'°',s:x=>(+x).toFixed(2)+' rev/s',tilt:x=>(+x).toFixed(1)+'°',drop:x=>(+x).toFixed(1)+' cm',slope:x=>(+x>0?'+':'')+(+x).toFixed(1)+'°'};
-const DEFAULTS={h:22,d:6.5,f:33,v:2.8,a:82,s:3.7,tilt:0,drop:20,slope:0};
+const DEFAULTS={h:22,d:6.5,f:33,v:2.8,a:82,s:5.2,tilt:0,drop:20,slope:0};
 const PRESETS={classic:{h:22,d:6.5},tall:{h:33,d:5.5},stubby:{h:13,d:8},jug:{h:30,d:11}};
 const SURFACES=['table','trampoline','carpet','ice'];
 let surface='table';
-let bottle=null,running=false,slow=false,zoomed=false,acc=0,last=0,camX=0,camY=0,camVX=0,camVY=0,camHold=null,camInit=false,levelMix=1,viewH=1.2,confetti=null,confT=0,finale=null;
+let bottle=null,running=false,slow=false,zoomed=false,acc=0,last=0,camX=0,camY=0,camVX=0,camVY=0,camHold=null,camInit=false,viewH=1.2,confetti=null,confT=0,finale=null;
 let best=0,progress={unlocked:1,done:[]};
 try{best=+(localStorage.getItem('bfl-best')||0)||0;const pr=JSON.parse(localStorage.getItem('bfl-progress')||'null');if(pr&&pr.unlocked)progress=pr;}catch(e){}
 let level=LEVELS[0];
@@ -111,8 +112,8 @@ function finish(){
   if(!ok){$('rScore').textContent='0 pts';$('rStars').textContent='☆☆☆☆☆';lastScore=0;$('share').hidden=false;if(challenge!==null)$('rTitle').textContent+=challenge>0?` — the ${challenge} pt challenge stands`:'';return;}
   $('rScore').textContent='…';$('rStars').textContent='measuring tolerance';
   const myRun=++runId;
-  measureTolerance(p).then(tol=>{
-    if(myRun!==runId)return;
+  measureTolerance(p,()=>myRun===runId).then(tol=>{
+    if(!tol||myRun!==runId)return;
     const pr=DEF_TAU/tol.tau,precision=pr*Math.sqrt(pr);
     const score=Math.max(10,Math.round(100*diffRel*precision));
     $('rScore').textContent=score+' pts';
@@ -142,24 +143,32 @@ function frame(ts){
 requestAnimationFrame(frame);
 
 // ---------- fluid rendering (metaball threshold of the particle field) ----------
-const off=document.createElement('canvas'),octx=off.getContext('2d',{willReadFrequently:true});
-function renderFluid(b,ppm){
-  const n=b.parts.length;if(!n)return null;
-  const w=Math.max(4,Math.min(256,Math.round(2*b.R*ppm))),hh=Math.max(4,Math.min(640,Math.round(b.h*ppm)));
-  if(off.width!==w||off.height!==hh){off.width=w;off.height=hh;}
-  const sx=w/(2*b.R),sy=hh/b.h;
-  octx.clearRect(0,0,w,hh);octx.globalCompositeOperation='lighter';
-  const rr=b.s*1.25*sx;
-  for(const q of b.parts){const px=(q.lx+b.R)*sx,py=hh-(q.ly+b.cy)*sy;
-    const g=octx.createRadialGradient(px,py,0,px,py,rr);g.addColorStop(0,'rgba(255,255,255,.95)');g.addColorStop(.55,'rgba(255,255,255,.5)');g.addColorStop(1,'rgba(255,255,255,0)');
-    octx.fillStyle=g;octx.beginPath();octx.arc(px,py,rr,0,6.283);octx.fill();}
-  octx.globalCompositeOperation='source-over';
-  const img=octx.getImageData(0,0,w,hh),d=img.data;
-  for(let i=0;i<d.length;i+=4){const a=d[i+3];
-    if(a<105){d[i+3]=0;}
-    else if(a<150){d[i]=150;d[i+1]=210;d[i+2]=250;d[i+3]=225;}
-    else{d[i]=33;d[i+1]=133;d[i+2]=222;d[i+3]=215;}}
-  octx.putImageData(img,0,0);return off;
+// Water surface from the particles: a smooth density field on a grid half a particle spacing wide, then marching
+// squares. The inside is filled as one path and the outline is drawn as a light rim. No pixel read-back, so it stays cheap.
+let field=new Float32Array(0);
+function drawFluid(b){
+  const P=b.parts,n=P.length;if(!n)return;
+  const cs=b.s*.5,x0=-b.R-cs,nx=Math.ceil((2*b.R+2*cs)/cs)+1,ny=Math.ceil((b.h+b.hc+2*cs)/cs)+1,y0=-cs;
+  if(field.length<nx*ny)field=new Float32Array(nx*ny);const f=field;f.fill(0,0,nx*ny);
+  const rr=b.s*1.25,rr2=rr*rr,k=Math.ceil(rr/cs);
+  for(let m=0;m<n;m++){const px=P[m].lx-x0,py=P[m].ly+b.cy-y0,ci=Math.round(px/cs),cj=Math.round(py/cs);
+    for(let j=Math.max(0,cj-k);j<=Math.min(ny-1,cj+k);j++){const dy=j*cs-py;for(let i=Math.max(0,ci-k);i<=Math.min(nx-1,ci+k);i++){const dx=i*cs-px,r2=dx*dx+dy*dy;if(r2<rr2){const t=1-r2/rr2;f[j*nx+i]+=t*t;}}}}
+  const T=.75,body=new Path2D(),rim=new Path2D(),X=i=>x0+i*cs,Y=j=>y0+j*cs;
+  for(let j=0;j<ny-1;j++){let run=-1;
+    for(let i=0;i<nx-1;i++){const a=f[j*nx+i],bb=f[j*nx+i+1],c=f[(j+1)*nx+i+1],d=f[(j+1)*nx+i];
+      const full=a>=T&&bb>=T&&c>=T&&d>=T;
+      if(full){if(run<0)run=i;continue;}
+      if(run>=0){body.rect(X(run),Y(j),(i-run)*cs,cs);run=-1;}
+      if(a<T&&bb<T&&c<T&&d<T)continue;
+      // corners in order: bottom-left, bottom-right, top-right, top-left; crossings on the edges between them
+      const cv=[a,bb,c,d],cx=[X(i),X(i+1),X(i+1),X(i)],cy=[Y(j),Y(j),Y(j+1),Y(j+1)],poly=[],cross=[];
+      for(let e=0;e<4;e++){const e2=(e+1)&3;if(cv[e]>=T)poly.push(cx[e],cy[e]);
+        if((cv[e]>=T)!==(cv[e2]>=T)){const t=(T-cv[e])/(cv[e2]-cv[e]),qx=cx[e]+t*(cx[e2]-cx[e]),qy=cy[e]+t*(cy[e2]-cy[e]);poly.push(qx,qy);cross.push(qx,qy);}}
+      body.moveTo(poly[0],poly[1]);for(let q=2;q<poly.length;q+=2)body.lineTo(poly[q],poly[q+1]);body.closePath();
+      for(let q=0;q+3<cross.length;q+=4){rim.moveTo(cross[q],cross[q+1]);rim.lineTo(cross[q+2],cross[q+3]);}}
+    if(run>=0)body.rect(X(run),Y(j),(nx-1-run)*cs,cs);}
+  ctx.fillStyle='rgba(33,133,222,.85)';ctx.fill(body);
+  ctx.strokeStyle='rgba(175,222,252,.95)';ctx.lineWidth=b.s*.45;ctx.lineCap='round';ctx.stroke(rim);
 }
 
 function draw(dt){
@@ -199,15 +208,8 @@ function draw(dt){
   // body: translucent plastic
   const gb=ctx.createLinearGradient(-R,0,R,0);gb.addColorStop(0,'rgba(255,255,255,.55)');gb.addColorStop(.35,'rgba(255,255,255,.25)');gb.addColorStop(.6,'rgba(220,230,240,.35)');gb.addColorStop(1,'rgba(180,195,215,.45)');
   bottlePath();ctx.fillStyle=gb;ctx.fill();
-  // water: sloshing particle field in flight, blending into a hydrostatic level pool as it comes to rest
-  // calm means the water moves with the bottle; the bottle itself may still slide
-  {const idle=!running&&!b.touched,calm=idle||b.done||(b.touched&&b.stable&&(b.rel||0)<.15&&Math.abs(b.w)<1);
-   levelMix+=((calm?1:0)-levelMix)*Math.min(1,dt*(calm?3:8));if(idle)levelMix=1;
-   // the particle picture hands over to the pool drawing in the first 15 % of the change, while both show the same water:
-   // the pool is drawn solid underneath and the particle picture fades out on top, so the water never looks paler
-   const hand=Math.min(1,levelMix/.15);
-   if(levelMix>.005&&b.parts.length){ctx.save();bottlePath();ctx.clip();drawLevelPool(b,ox,oy,scale,lw,levelMix);ctx.restore();}
-   if(hand<.995){const fl=renderFluid(b,scale);if(fl){ctx.save();ctx.globalAlpha=1-hand;bottlePath();ctx.clip();ctx.scale(1,-1);ctx.drawImage(fl,-R,-h,2*R,h);ctx.restore();}}}
+  // water: drawn from the simulated particles the whole time
+  ctx.save();bottlePath();ctx.clip();drawFluid(b);ctx.restore();
   // shell outline + highlights
   bottlePath();ctx.lineWidth=lw;ctx.strokeStyle='rgba(30,41,59,.8)';ctx.stroke();
   ctx.fillStyle='rgba(255,255,255,.75)';ctx.beginPath();ctx.roundRect(-R*.78,h*.06,R*.14,h*.66,R*.07);ctx.fill();
@@ -226,52 +228,6 @@ function draw(dt){
   $('hudF').textContent=(Math.abs(running?b.flipAng:(b.touched?b.airAng:b.flipAng))/(2*Math.PI)).toFixed(1)+' flips';
   if(confetti){for(const q of confetti){ctx.save();ctx.translate(q.x*W,q.y*H);ctx.rotate(q.r);ctx.fillStyle=q.c;ctx.fillRect(-4*dpr,-2.5*dpr*q.w,8*dpr,5*dpr*q.w);ctx.restore();}}
   if(finale)drawFinale(dt,W,H,dpr);
-}
-// Slosh of the settled water: the surface tilts towards the effective gravity (gravity minus the bottle's acceleration)
-// and swings about it as a damped oscillator at the first slosh mode of a cylinder. Drawing only; the physics never reads it.
-function updateSlosh(b){
-  const s=b.slosh||(b.slosh={a:0,w:0,vx:b.vx,vy:b.vy,t:b.t,ax:0,ay:0});
-  const dt=b.t-s.t;if(dt<=0)return s;
-  const lim=3*G,ax=Math.max(-lim,Math.min(lim,(b.vx-s.vx)/dt)),ay=Math.max(-lim,Math.min(lim,(b.vy-s.vy)/dt));
-  s.vx=b.vx;s.vy=b.vy;s.t=b.t;
-  if(!b.touched){s.a=0;s.w=0;s.ax=0;s.ay=0;return s;} // in free fall the water has no down
-  // smooth the acceleration over 0.15 s so that small contact jitter on the surface does not keep the water rocking
-  const k=Math.min(1,dt/.15);s.ax+=(ax-s.ax)*k;s.ay+=(ay-s.ay)*k;
-  const target=Math.max(-.6,Math.min(.6,Math.atan2(s.ax,G+s.ay)));
-  const D=2*b.Ri,hw=Math.max(.005,(b.params?b.params.fill:.33)*b.h),om=Math.sqrt(Math.PI*G/D*Math.tanh(Math.PI*hw/D)),z=.06;
-  const n=Math.ceil(dt*om*8),hs=dt/n;
-  for(let i=0;i<n;i++){s.w+=(-om*om*(s.a-target)-2*z*om*s.w)*hs;s.a+=s.w*hs;}
-  s.a=Math.max(-.7,Math.min(.7,s.a));
-  return s;
-}
-function drawLevelPool(b,ox,oy,scale,lw,mix){
-  const c=Math.cos(b.th),si=Math.sin(b.th);
-  // the outline that bottlePath draws, with its curved shoulder, so the water fills the shoulder up to the wall
-  const R=b.R,yc=b.hs+(b.h-b.hs)*.4,loc=[[-R,-b.cy],[R,-b.cy]];
-  for(let i=0;i<=12;i++){const t=i/12,u=1-t;loc.push([u*u*R+2*u*t*R+t*t*b.Rn,u*u*b.hs+2*u*t*yc+t*t*b.h-b.cy]);}
-  for(let i=0;i<=12;i++){const t=i/12,u=1-t;loc.push([-(u*u*b.Rn+2*u*t*R+t*t*R),u*u*b.h+2*u*t*yc+t*t*b.hs-b.cy]);}
-  // work in a frame centred on the bottle and turned so that the sloshing surface is level
-  const al=updateSlosh(b).a,ca=Math.cos(al),sa=Math.sin(al);
-  const poly=loc.map(([lx,ly])=>{const x=c*lx-si*ly,y=si*lx+c*ly;return[ca*x-sa*y,sa*x+ca*y];});
-  const area=P=>{let a=0;for(let i=0;i<P.length;i++){const[x1,y1]=P[i],[x2,y2]=P[(i+1)%P.length];a+=x1*y2-x2*y1;}return Math.abs(a)/2;};
-  const clipBelow=(P,yl)=>{const out=[];for(let i=0;i<P.length;i++){const A=P[i],B=P[(i+1)%P.length];const ina=A[1]<=yl,inb=B[1]<=yl;
-    if(ina)out.push(A);if(ina!==inb){const t=(yl-A[1])/(B[1]-A[1]);out.push([A[0]+t*(B[0]-A[0]),yl]);}}return out;};
-  const target=b.params?b.params.fill*2*b.Ri*b.h:(b.parts.length*b.s*b.s);
-  let lo=Math.min(...poly.map(p=>p[1])),hi=Math.max(...poly.map(p=>p[1]));
-  for(let i=0;i<22;i++){const mid=(lo+hi)/2;if(area(clipBelow(poly,mid))<target)lo=mid;else hi=mid;}
-  const yl=(lo+hi)/2,pool=clipBelow(poly,yl);if(pool.length<3)return;
-  // surface: starts as the top of the particle water and eases to the level surface as the water calms (mix 0 to 1)
-  const xs=poly.map(p=>p[0]),x0=Math.min(...xs),x1=Math.max(...xs),bot=Math.min(...poly.map(p=>p[1])),K=32,surf=[];
-  const pts=b.parts.map(q=>{const x=q.x-b.x,y=q.y-b.y;return[ca*x-sa*y,sa*x+ca*y];}),reach=b.s*.9,top=b.s*.55;
-  for(let k=0;k<=K;k++){const x=x0+(x1-x0)*k/K;let hp=-1e9;for(const[px,py]of pts)if(Math.abs(px-x)<reach&&py+top>hp)hp=py+top;surf.push([x,hp<bot?bot:hp]);}
-  for(let pass=0;pass<2;pass++)for(let k=1;k<K;k++)surf[k][1]=(surf[k-1][1]+2*surf[k][1]+surf[k+1][1])/4;
-  for(const p of surf)p[1]=yl+(1-mix)*(p[1]-yl);
-  ctx.setTransform(1,0,0,1,0,0);ctx.translate(ox,oy);ctx.scale(scale,-scale);ctx.translate(b.x,b.y);ctx.rotate(-al);
-  const g=ctx.createLinearGradient(0,yl,0,bot);g.addColorStop(0,'rgba(33,133,222,.78)');g.addColorStop(1,'rgba(20,100,190,.9)');
-  ctx.save();ctx.beginPath();ctx.moveTo(x0-1,surf[0][1]);for(const[x,y]of surf)ctx.lineTo(x,y);ctx.lineTo(x1+1,surf[K][1]);ctx.lineTo(x1+1,bot-1);ctx.lineTo(x0-1,bot-1);ctx.closePath();ctx.clip();
-  ctx.beginPath();poly.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fillStyle=g;ctx.fill();ctx.restore();
-  // meniscus line (the bottle outline clips it to the inside)
-  ctx.strokeStyle='rgba(190,225,255,.9)';ctx.lineWidth=lw*1.2;ctx.beginPath();surf.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.stroke();
 }
 function minVertexY(b){const c=Math.cos(b.th),si=Math.sin(b.th);let m=1e9;for(const[vx,vy]of b.verts){const ry=si*vx+c*vy;if(ry<m)m=ry;}return m;}
 function drawSurface(b,W,H,dpr,scale,ox,oy){
@@ -320,9 +276,7 @@ function drawFinale(dt,W,H,dpr){
 }
 
 // ---------- long-press "solve" ----------
-function simOutcome(p){const b=makeBottle(p);while(!b.done)step(b);return b;}
-function passes(b,p){return b.outcome!=='flop'&&levelPasses(level,b,p);}
-const tick=()=>new Promise(r=>setTimeout(r,0));
+function passes(r,p){return r.outcome!=='flop'&&levelPasses(level,r,p);}
 let solving=false;
 function paramsWith(id,val){const vals={};for(const i of ids)vals[i]=+$(i).value;vals[id]=val;
   return{h:vals.h/100,d:vals.d/100,fill:vals.f/100,v:vals.v,angle:vals.a,spin:vals.s,tilt:vals.tilt,drop:vals.drop/100,slope:vals.slope,surface};}
@@ -331,21 +285,23 @@ async function solveSlider(id){
   const row=el.closest('.row'),min=+el.min,max=+el.max,st=+el.step,cur=+el.value;
   row.classList.add('solving');const valEl=$(id+'V');const dec=(st+'').split('.')[1]?.length||0;
   const snap=x=>+(Math.round((x-min)/st)*st+min).toFixed(dec);
-  const ok=v=>{const p=paramsWith(id,v);return passes(simOutcome(p),p);};
+  const ok=async v=>{const p=paramsWith(id,v);return passes(await runThrow(p),p);};
   let found=null;
   try{
-    if(ok(cur)){found=cur;}
+    if(await ok(cur)){found=cur;}
     else{
       const cs=Math.max(st,(max-min)/24);let k=1,dirHit=0,kHit=0;
       while(cur+k*cs<=max+1e-9||cur-k*cs>=min-1e-9){
-        for(const dir of[1,-1]){const v=snap(cur+dir*k*cs);if(v<min||v>max)continue;
-          valEl.textContent='solving '+fmt[id](v)+'…';await tick();
-          if(ok(v)){dirHit=dir;kHit=k;break;}}
+        // both directions at once
+        const tries=[1,-1].map(dir=>{const v=snap(cur+dir*k*cs);return v<min||v>max?null:{dir,v};}).filter(Boolean);
+        valEl.textContent='solving '+tries.map(t=>fmt[id](t.v)).join(' / ')+'…';
+        const res=await Promise.all(tries.map(t=>ok(t.v)));
+        const hitAt=res.indexOf(true);if(hitAt>=0){dirHit=tries[hitAt].dir;kHit=k;}
         if(dirHit)break;k++;
       }
       if(dirHit){let hit=snap(cur+dirHit*kHit*cs),miss=cur+dirHit*(kHit-1)*cs;found=hit;
         while(Math.abs(hit-miss)>st*1.5){const mid=snap((hit+miss)/2);if(mid===hit||mid===miss)break;
-          valEl.textContent='solving '+fmt[id](mid)+'…';await tick();if(ok(mid)){hit=mid;found=mid;}else miss=mid;}}
+          valEl.textContent='solving '+fmt[id](mid)+'…';if(await ok(mid)){hit=mid;found=mid;}else miss=mid;}}
     }
   }finally{
     row.classList.remove('solving');
@@ -357,8 +313,9 @@ async function solveSlider(id){
 async function solveSurface(){
   if(solving||running)return;solving=true;const box=$('surfaces');box.classList.add('solving');
   let found=null;const allowed=level.surface||SURFACES;
-  try{for(const sf of[surface,...allowed]){if(!allowed.includes(sf))continue;await tick();
-      const p=readParams();p.surface=sf;if(passes(simOutcome(p),p)){found=sf;break;}}}
+  try{const order=[surface,...allowed.filter(s=>s!==surface)].filter(sf=>allowed.includes(sf));
+    const res=await Promise.all(order.map(sf=>{const p=readParams();p.surface=sf;return runThrow(p).then(r=>passes(r,p));}));
+    const at=res.indexOf(true);if(at>=0)found=order[at];}
   finally{box.classList.remove('solving');
     if(found)setSurface(found);else{const l=$('surfLabel');l.textContent='impossible';setTimeout(()=>l.textContent='Surface',1800);}
     solving=false;}
@@ -379,16 +336,26 @@ armPress($('surfaces').parentElement,solveSurface);
 // ---------- tolerance scoring ----------
 const RANGES={h:[.10,.40,'height'],d:[.04,.12,'diameter'],fill:[0,1,'fill'],v:[0,6,'speed'],angle:[40,140,'angle'],spin:[-6,6,'spin'],tilt:[-60,60,'tilt'],drop:[0,1.5,'drop height'],slope:[-10,10,'surface tilt']};
 const LADDER=[.005,.015,.04,.1,.25];
-const DEF_PARAMS={h:.22,d:.065,fill:.33,v:2.8,angle:82,spin:3.4,tilt:0,drop:.2,slope:0,surface:'table'};
+const DEF_PARAMS={h:.22,d:.065,fill:.33,v:2.8,angle:82,spin:4.6,tilt:0,drop:.2,slope:0,surface:'table'};
 const DEF_DIFF=difficulty(DEF_PARAMS,'upright').total;
 const DEF_TAU=.04;
 let runId=0;
-async function measureTolerance(p){
-  let tau=.4,worst='';
-  for(const k in RANGES){const[lo,hi,name]=RANGES[k],span=hi-lo;
-    for(const dir of[1,-1])for(const f of LADDER){if(f>=tau)break;const v=p[k]+dir*f*span;if(v<lo||v>hi)break;
-      await tick();if(simOutcome({...p,[k]:v}).outcome==='flop'){if(f<tau){tau=f;worst=name;}break;}}}
-  return{tau,worst};
+// The score's tolerance: the smallest step (share of a setting's range) at which changing any one setting turns the
+// landing into a flop. All settings are tried at the smallest step first, in parallel; the first step with a flop
+// ends the search, and the throws still queued for it are dropped. Returns null if a newer flip replaced this one.
+async function measureTolerance(p,stillCurrent){
+  let live=Object.keys(RANGES).flatMap(k=>[[k,1],[k,-1]]);
+  for(const f of LADDER){
+    live=live.filter(([k,dir])=>{const[lo,hi]=RANGES[k],v=p[k]+dir*f*(hi-lo);return v>=lo&&v<=hi;});
+    if(!live.length)break;
+    const hit=await new Promise(resolve=>{let left=live.length,over=false;
+      live.forEach(([k,dir],i)=>{const[lo,hi]=RANGES[k];runThrow({...p,[k]:p[k]+dir*f*(hi-lo)}).then(r=>{if(over)return;
+        if(r&&r.outcome==='flop'){over=true;cancelQueued();resolve(i);return;}
+        if(--left===0){over=true;resolve(-1);}});});});
+    if(!stillCurrent())return null;
+    if(hit>=0)return{tau:f,worst:RANGES[live[hit][0]][2]};
+  }
+  return{tau:.4,worst:''};
 }
 
 // ---------- share links ----------

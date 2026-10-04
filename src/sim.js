@@ -18,7 +18,15 @@ function dtan(x){const sc=dsincos(x);return sc[0]/sc[1];}
 
 
 // ---------- Physics (SI units; deterministic fixed-step) ----------
-const G = 9.81, DT = 1/600, BETA = .25, ITERS = 4;
+const G = 9.81, DT = 1/600, ITERS = 4;
+// Water: Position Based Fluids (Macklin and Muller 2013). Every step the particles are moved so that the density around
+// each one stays at the rest density (incompressible), then a little XSPH smoothing evens out their velocities.
+// N: number of water particles (cost grows with it). HK: kernel radius in particle spacings.
+// ITER: density iterations per step. EPS: relaxation of the density constraint. SCORR_K: small repulsion that keeps
+// particles from clumping. CMIN: lowest density error the solver acts on (below 0: the water holds together a little).
+// XSPH: share of the velocity difference to neighbours removed per step.
+// WALL_MU: drag of the water along the inside of the bottle (1/s, so it does not depend on the time step).
+const FLUID = { N: 200, HK: 2.25, ITER: 2, EPS: .5, SCORR_K: .1, XSPH: .02, WALL_MU: 20, CMIN: 0 };
 const SURF = { table:{mu:.45,e:.12}, trampoline:{mu:.6,e:.55}, carpet:{mu:.8,e:.05}, ice:{mu:.05,e:.1} };
 
 function makeBottle(p){
@@ -37,8 +45,21 @@ function makeBottle(p){
   const verts=[[-R,-cy],[R,-cy],[R,hs-cy],[-R,hs-cy],[Rn,h-cy],[-Rn,h-cy],[Rc,h-cy],[-Rc,h-cy],[Rc,h+hc-cy],[-Rc,h+hc-cy]];
   // fluid particles
   const area = p.fill*2*Ri*h, vol = p.fill*Math.PI*Ri*Ri*h, mf = 1000*vol;
-  const n = p.fill<=0?0:Math.max(2,Math.round(70*p.fill));
-  const s = n? Math.sqrt(area/n):.01, mp = n? mf/n:0, rp = s*.45;
+  // a fixed count: the particle size follows the amount of water, so a small change of a setting is a small change of the throw
+  const n = p.fill<=0?0:FLUID.N;
+  const s = n? Math.sqrt(area/n):.01, mp = n? mf/n:0, rp = s*.5;
+  // kernel radius and the rest density of a square lattice at spacing s (the water's packing at rest)
+  // kernel W = (h^2-r^2)^3 (poly6 without its constant), rest density and the size of the constraint gradient for a
+  // particle inside a square lattice at spacing s; EPS and SCORR_K are relative to that size, so they do not depend on s
+  const kh = FLUID.HK*s;let rho0=0,g2=0;
+  for(let i=-3;i<=3;i++)for(let j=-3;j<=3;j++){const r2=(i*i+j*j)*s*s;if(r2<kh*kh){const u=kh*kh-r2;rho0+=u*u*u;g2+=36*u*u*u*u*r2;}}
+  const den0=g2/(rho0*rho0);
+  // wall density: what rows of particles behind a wall would add to a particle at distance d from it (d from 0 to h),
+  // as density and as its derivative along the wall normal. 33 samples, interpolated linearly.
+  const WT=33,wrho=new Float64Array(WT),wgrad=new Float64Array(WT);
+  for(let t=0;t<WT;t++){const d=kh*t/(WT-1);let r=0,gr=0;
+    for(let m=0;m<8;m++){const gy=-(s/2+m*s)-d;for(let i=-8;i<=8;i++){const gx=i*s,r2=gx*gx+gy*gy;if(r2>=kh*kh)continue;const u=kh*kh-r2;r+=u*u*u;gr+=6*u*u*(-gy);}}
+    wrho[t]=r;wgrad[t]=gr;}
   const parts=[];
   if(n){
     const cols=Math.max(1,Math.floor(2*Ri/s)), x0=-Ri+ (2*Ri-cols*s)/2 + s/2;
@@ -49,7 +70,7 @@ function makeBottle(p){
   const surf=SURF[p.surface]||SURF.table;
   const th=p.tilt*Math.PI/180, ang=p.angle*Math.PI/180;
   const phi=(p.slope||0)*Math.PI/180,fnx=-dsin(phi),fny=dcos(phi); // surface plane through the origin, tilted by phi
-  const b={M,I,cy,h,R,Rc,hc,Ri,Rn,hs,planes,verts,parts,mp,rp,s,phi,fnx,fny,
+  const b={M,I,cy,h,R,Rc,hc,Ri,Rn,hs,planes,verts,parts,mp,rp,s,kh,rho0,den0,wrho,wgrad,phi,fnx,fny,
     mu:surf.mu,e:surf.e,spring:p.surface==='trampoline'?{k:650,c:1.0}:null, x:0,y:0,th,vx:p.v*dcos(ang),vy:p.v*dsin(ang),w:p.spin*2*Math.PI,
     t:0,touched:false,touchT:-1,stable:false,poseTh:0,poseX:0,poseY:0,flipAng:0,settledT:0,done:false,outcome:null,lastAng:th,airAng:0};
   // place so the lowest vertex sits at drop height above the surface (measured along the surface normal at x=0)
@@ -67,46 +88,104 @@ function makeBottle(p){
 
 function applyJ(b,rx,ry,jx,jy){b.vx+=jx/b.M;b.vy+=jy/b.M;b.w+=(rx*jy-ry*jx)/b.I;}
 
+// Neighbour pairs from a grid in the bottle's own frame (the water stays inside the bottle), cells one kernel radius wide.
+// Each cell checks itself and four of its neighbours, so each pair is found once. Arrays are reused between steps.
+// The order depends only on particle order, so every engine finds the same pairs in the same order.
+function buildPairs(b){
+  const P=b.parts,n=P.length,kh=b.kh,kh2=kh*kh;
+  let W=b.work;
+  if(!W){const gx=Math.ceil(2*b.R/kh)+3,gy=Math.ceil((b.h+.02)/kh)+3;
+    W=b.work={gx,gy,head:new Int32Array(gx*gy),next:new Int32Array(n),cell:new Int32Array(n),
+      pi:new Int32Array(n*12),pj:new Int32Array(n*12),np:0,dx:new Float64Array(n),dy:new Float64Array(n),rho:new Float64Array(n),rhn:new Float64Array(n),px:new Float64Array(n),py:new Float64Array(n)};}
+  const gx=W.gx,gy=W.gy,head=W.head,next=W.next,c=dcos(b.th),si=dsin(b.th),x0=-b.R-kh,y0=-b.cy-kh;
+  head.fill(-1);
+  for(let i=n-1;i>=0;i--){const wx=P[i].x-b.x,wy=P[i].y-b.y;
+    let ix=Math.floor((c*wx+si*wy-x0)/kh),iy=Math.floor((-si*wx+c*wy-y0)/kh);
+    ix=ix<0?0:ix>=gx?gx-1:ix;iy=iy<0?0:iy>=gy?gy-1:iy;const cl=iy*gx+ix;W.cell[i]=cl;next[i]=head[cl];head[cl]=i;}
+  let np=0;
+  for(let i=0;i<n;i++){const a=P[i],cl=W.cell[i],ix=cl%gx,iy=(cl-ix)/gx;
+    for(let k=0;k<5;k++){const ox=k===0?0:k===1?1:k===2?-1:k===3?0:1,oy=k===0?0:k===1?0:1;const jx=ix+ox,jy=iy+oy;
+      if(jx<0||jx>=gx||jy>=gy)continue;
+      for(let j=head[jy*gx+jx];j>=0;j=next[j]){if(k===0&&j<=i)continue;
+        const dx=P[j].x-a.x,dy=P[j].y-a.y;if(dx*dx+dy*dy>=kh2)continue;
+        if(np>=W.pi.length){const g=2*W.pi.length;const a1=new Int32Array(g),a2=new Int32Array(g);a1.set(W.pi);a2.set(W.pj);W.pi=a1;W.pj=a2;}
+        W.pi[np]=i;W.pj[np]=j;np++;}}}
+  W.np=np;return W;
+}
+function fluid(b,dt){
+  const P=b.parts,n=P.length,kh=b.kh,kh2=kh*kh,F=FLUID,rho0=b.rho0,eps=F.EPS*b.den0;
+  const wq=kh2-.04*kh2,wq3=wq*wq*wq,sk=F.SCORR_K/b.den0; // artificial pressure: reference distance 0.2 h
+  const W=b.work||buildPairs(b);
+  for(let i=0;i<n;i++){const q=P[i];q.vy-=G*dt;W.px[i]=q.x;W.py[i]=q.y;q.x+=q.vx*dt;q.y+=q.vy*dt;}
+  buildPairs(b);
+  const rho=W.rho,lam=W.rhn,GX=W.dx,GY=W.dy;
+  for(let it=0;it<F.ITER;it++){
+    // density, and the gradient of the density constraint (sum vector and sum of squares per particle)
+    const sq=lam;for(let i=0;i<n;i++){rho[i]=kh2*kh2*kh2;GX[i]=0;GY[i]=0;sq[i]=0;}
+    // walls: density from the rows of particles a wall stands for, and its gradient (pointing into the water)
+    {const c=dcos(b.th),si=dsin(b.th),pl=b.planes,WT=b.wrho.length-1;
+     for(let i=0;i<n;i++){const wx=P[i].x-b.x,wy=P[i].y-b.y,lx=c*wx+si*wy,ly=-si*wx+c*wy;
+      for(let k=0;k<pl.length;k++){const L=pl[k];let d=(lx-L.qx)*L.nx+(ly-L.qy)*L.ny;if(d>=kh)continue;if(d<0)d=0;
+        const f=d/kh*WT,t0=Math.floor(f),t1=t0<WT?t0+1:WT,a=f-t0,wr=b.wrho[t0]*(1-a)+b.wrho[t1]*a,wg=b.wgrad[t0]*(1-a)+b.wgrad[t1]*a;
+        const nx=c*L.nx-si*L.ny,ny=si*L.nx+c*L.ny;rho[i]+=wr;GX[i]-=wg*nx;GY[i]-=wg*ny;sq[i]+=wg*wg;}}}
+    for(let k=0;k<W.np;k++){const i=W.pi[k],j=W.pj[k];const dx=P[j].x-P[i].x,dy=P[j].y-P[i].y,r2=dx*dx+dy*dy;if(r2>=kh2)continue;
+      const u=kh2-r2,w=u*u*u;rho[i]+=w;rho[j]+=w;
+      const f=6*u*u,gx=f*dx,gy=f*dy,gg=f*f*r2; // gradient of W(x_i-x_j) with respect to x_i, pointing from i towards j
+      GX[i]+=gx;GY[i]+=gy;GX[j]-=gx;GY[j]-=gy;sq[i]+=gg;sq[j]+=gg;}
+    // lambda: how far to move along the gradient to restore the rest density (and, down to CMIN, where it is stretched)
+    for(let i=0;i<n;i++){const C0=rho[i]/rho0-1,C=C0>F.CMIN?C0:F.CMIN;lam[i]=C!==0?-C/((GX[i]*GX[i]+GY[i]*GY[i]+sq[i])/(rho0*rho0)+eps):0;}
+    for(let i=0;i<n;i++){GX[i]=0;GY[i]=0;}
+    for(let k=0;k<W.np;k++){const i=W.pi[k],j=W.pj[k];const dx=P[j].x-P[i].x,dy=P[j].y-P[i].y,r2=dx*dx+dy*dy;if(r2>=kh2)continue;
+      const u=kh2-r2,w=u*u*u/wq3,w2=w*w,corr=-sk*w2*w2;
+      const f=6*u*u*(lam[i]+lam[j]+corr)/rho0;GX[i]+=f*dx;GY[i]+=f*dy;GX[j]-=f*dx;GY[j]-=f*dy;}
+    {const c=dcos(b.th),si=dsin(b.th),pl=b.planes,WT=b.wrho.length-1;
+     for(let i=0;i<n;i++){if(lam[i]>=0)continue; // a wall only pushes: cohesion must not glue water to it
+      const wx=P[i].x-b.x,wy=P[i].y-b.y,lx=c*wx+si*wy,ly=-si*wx+c*wy;
+      for(let k=0;k<pl.length;k++){const L=pl[k];let d=(lx-L.qx)*L.nx+(ly-L.qy)*L.ny;if(d>=kh)continue;if(d<0)d=0;
+        const f=d/kh*WT,t0=Math.floor(f),t1=t0<WT?t0+1:WT,a=f-t0,wg=b.wgrad[t0]*(1-a)+b.wgrad[t1]*a;
+        const nx=c*L.nx-si*L.ny,ny=si*L.nx+c*L.ny,m=-lam[i]*wg/rho0;GX[i]+=m*nx;GY[i]+=m*ny;
+        // the wall pushes the water, so the water pushes the bottle back: equal and opposite impulse at the particle
+        const jx=-b.mp*m*nx/dt,jy=-b.mp*m*ny/dt;applyJ(b,P[i].x-b.x,P[i].y-b.y,jx,jy);}}}
+    for(let i=0;i<n;i++){P[i].x+=GX[i];P[i].y+=GY[i];}
+  }
+  for(let i=0;i<n;i++){const q=P[i];q.vx=(q.x-W.px[i])/dt;q.vy=(q.y-W.py[i])/dt;}
+  // XSPH: nudge each velocity towards its neighbours' (pairwise, so momentum is kept)
+  if(F.XSPH)for(let k=0;k<W.np;k++){const a=P[W.pi[k]],o=P[W.pj[k]];const dx=o.x-a.x,dy=o.y-a.y,r2=dx*dx+dy*dy;if(r2>=kh2)continue;
+    const u=(kh2-r2)/kh2,w=F.XSPH*u*u*u*.5,ex=(o.vx-a.vx)*w,ey=(o.vy-a.vy)*w;a.vx+=ex;a.vy+=ey;o.vx-=ex;o.vy-=ey;}
+}
 function step(b){
   if(b.done)return;
   const dt=DT;
   b.vy-=G*dt; b.x+=b.vx*dt; b.y+=b.vy*dt; b.th+=b.w*dt;
   const P=b.parts, n=P.length;
-  for(const q of P){q.vy-=G*dt;q.x+=q.vx*dt;q.y+=q.vy*dt;}
-  // particle-particle: incompressibility + viscosity
-  const s=b.s;
-  for(let it=0;it<2;it++)for(let i=0;i<n;i++){const a=P[i];for(let j=i+1;j<n;j++){const o=P[j];
-    let dx=o.x-a.x,dy=o.y-a.y,d2=dx*dx+dy*dy;if(d2>=s*s||d2<1e-12)continue;
-    const d=Math.sqrt(d2),ux=dx/d,uy=dy/d,target=BETA*(s-d)/dt;
-    const rvx=o.vx-a.vx,rvy=o.vy-a.vy,vn=rvx*ux+rvy*uy;
-    if(vn<target){const k=(vn-target)*.5;a.vx+=ux*k;a.vy+=uy*k;o.vx-=ux*k;o.vy-=uy*k;}
-    if(it===0){const k=vn*.04;a.vx+=ux*k;a.vy+=uy*k;o.vx-=ux*k;o.vy-=uy*k;}
-  }}
+  // water: relax positions towards the rest density, then viscosity between approaching neighbours
+  if(n)fluid(b,dt);
   // particle-wall and floor contacts, iterated so the stiff water/shell/floor chain converges
   const c=dcos(b.th),si=dsin(b.th);
   let contact=false;
   const W=[];let minD=1e9;const fnx=b.fnx,fny=b.fny,ftx=fny,fty=-fnx; // normal and tangent of the surface
   for(const[vx,vy]of b.verts){const rx=c*vx-si*vy,ry=si*vx+c*vy;const dn=(b.x+rx)*fnx+(b.y+ry)*fny;W.push([rx,ry,dn]);if(dn<minD)minD=dn;}
-  if(!b.spring&&minD<0){b.x-=minD*fnx;b.y-=minD*fny;for(const v of W)v[2]-=minD;}
+  if(!b.spring&&minD<0){b.x-=minD*fnx;b.y-=minD*fny;for(const v of W)v[2]-=minD;for(const q of P){q.x-=minD*fnx;q.y-=minD*fny;}} // the water moves with the bottle
+  // particle-wall contacts: positions do not change inside the iterations, so find the touching pairs once
+  const CT=b.ct||(b.ct={p:new Int32Array(n*3+8),nx:new Float64Array(n*3+8),ny:new Float64Array(n*3+8),rx:new Float64Array(n*3+8),ry:new Float64Array(n*3+8),d:new Float64Array(n*3+8)});
+  let nc=0;const pl=b.planes,rp=b.rp,inX=b.Ri-rp,inLo=-b.cy+rp,inHi=b.hs-b.cy-rp;
+  for(let i=0;i<n;i++){const q=P[i],wx=q.x-b.x,wy=q.y-b.y,lx=c*wx+si*wy,ly=-si*wx+c*wy;q.lx=lx;q.ly=ly;
+    if(lx>-inX&&lx<inX&&ly>inLo&&ly<inHi)continue; // well inside the straight part of the body: touches no wall
+    for(let k=0;k<pl.length;k++){const L=pl[k];const d=(lx-L.qx)*L.nx+(ly-L.qy)*L.ny-rp;if(d>=0)continue;
+      if(nc>=CT.p.length)break;
+      CT.p[nc]=i;CT.nx[nc]=c*L.nx-si*L.ny;CT.ny[nc]=si*L.nx+c*L.ny;CT.rx[nc]=c*lx-si*ly;CT.ry[nc]=si*lx+c*ly;CT.d[nc]=d;nc++;}}
+  const kmp=1/b.mp,kM=1/b.M,kI=1/b.I;
   for(let iter=0;iter<ITERS;iter++){
-  for(const q of P){
-    const wx=q.x-b.x,wy=q.y-b.y;
-    let lx=c*wx+si*wy, ly=-si*wx+c*wy;
-    for(const pl of b.planes){
-      const d=(lx-pl.qx)*pl.nx+(ly-pl.qy)*pl.ny-b.rp;
-      if(d>=0)continue;
-      const nx=c*pl.nx-si*pl.ny, ny=si*pl.nx+c*pl.ny;
-      const rx=c*lx-si*ly, ry=si*lx+c*ly;
+  for(let m=0;m<nc;m++){const q=P[CT.p[m]],nx=CT.nx[m],ny=CT.ny[m],rx=CT.rx[m],ry=CT.ry[m];
       const vpx=b.vx-b.w*ry, vpy=b.vy+b.w*rx;
       let rvx=q.vx-vpx,rvy=q.vy-vpy, vn=rvx*nx+rvy*ny;
-      const target=BETA*(-d)/dt;
-      if(vn<target){const rn=rx*ny-ry*nx,k=1/b.mp+1/b.M+rn*rn/b.I,j=(target-vn)/k;
-        q.vx+=j*nx/b.mp;q.vy+=j*ny/b.mp;applyJ(b,rx,ry,-j*nx,-j*ny);
+      // the contact only stops motion into the wall; the overlap is removed by moving the particle (below), which adds no energy
+      const target=0;
+      if(vn<target){const rn=rx*ny-ry*nx,k=kmp+kM+rn*rn*kI,j=(target-vn)/k;
+        q.vx+=j*nx*kmp;q.vy+=j*ny*kmp;applyJ(b,rx,ry,-j*nx,-j*ny);
         rvx=q.vx-(b.vx-b.w*ry);rvy=q.vy-(b.vy+b.w*rx);}
-      const tx=-ny,ty=nx,vt=rvx*tx+rvy*ty,rt=rx*ty-ry*tx,kt=1/b.mp+1/b.M+rt*rt/b.I,jt=-vt*.12/kt;
-      q.vx+=jt*tx/b.mp;q.vy+=jt*ty/b.mp;applyJ(b,rx,ry,-jt*tx,-jt*ty);
-    }
-    q.lx=lx;q.ly=ly;
+      const tx=-ny,ty=nx,vt=rvx*tx+rvy*ty,rt=rx*ty-ry*tx,kt=kmp+kM+rt*rt*kI,jt=-vt*FLUID.WALL_MU*dt/ITERS/kt;
+      q.vx+=jt*tx*kmp;q.vy+=jt*ty*kmp;applyJ(b,rx,ry,-jt*tx,-jt*ty);
   }
   // surface contact (plane with normal fn, tangent ft)
   for(const v of W){const rx=v[0],ry=v[1];const dn=(b.x+rx)*fnx+(b.y+ry)*fny;
@@ -121,9 +200,10 @@ function step(b){
     if(!b.touched){b.touched=true;b.touchT=b.t;b.airAng=b.flipAng;}
     if(vn<0){const eEff=Math.abs(vn)<.35?0:b.e;const k=1/b.M+rn*rn/b.I,j=-(1+eEff)*vn/k;applyJ(b,rx,ry,j*fnx,j*fny);
       const vpx2=b.vx-b.w*ry,vpy2=b.vy+b.w*rx,vt2=vpx2*ftx+vpy2*fty;const kt=1/b.M+rt*rt/b.I;let jt=-vt2/kt;const lim=b.mu*j;if(jt>lim)jt=lim;if(jt<-lim)jt=-lim;applyJ(b,rx,ry,jt*ftx,jt*fty);}
-    else{const kt=1/b.M+rt*rt/b.I;let jt=-vt/kt;const lim=b.mu*b.M*G*dt*2;if(jt>lim)jt=lim;if(jt<-lim)jt=-lim;applyJ(b,rx,ry,jt*ftx,jt*fty);}
+    else{const kt=1/b.M+rt*rt/b.I;let jt=-vt/kt;const lim=b.mu*(b.M+n*b.mp)*G*dt*2; /* resting friction carries the water weight too */if(jt>lim)jt=lim;if(jt<-lim)jt=-lim;applyJ(b,rx,ry,jt*ftx,jt*fty);}
   }
   }
+  for(let m=0;m<nc;m++){const q=P[CT.p[m]];q.x-=CT.d[m]*CT.nx[m];q.y-=CT.d[m]*CT.ny[m];}
   // stable only if the whole system's centre of mass sits over the points touching the surface
   let stable=false;
   if(contact){let lo=1e9,hi=-1e9;for(const[rx,ry]of W){const dn=(b.x+rx)*fnx+(b.y+ry)*fny;if(dn<=(b.spring?0:6e-3)){const tproj=(b.x+rx)*ftx+(b.y+ry)*fty;lo=Math.min(lo,tproj);hi=Math.max(hi,tproj);}}
@@ -133,8 +213,7 @@ function step(b){
     // settle damping acts on spin and the normal component; along the slope only when friction can actually hold the bottle
     const vn=b.vx*fnx+b.vy*fny,vt=b.vx*ftx+b.vy*fty,holds=b.mu>=dtan(Math.abs(b.phi))*1.05;const dmpT=holds?dmp:1-2.5*dt;
     const vn2=vn*dmp,vt2=vt*dmpT;b.vx=vn2*fnx+vt2*ftx;b.vy=vn2*fny+vt2*fty;b.w*=dmp;
-    // once on the surface, let the water calm down (viscous settling)
-    const kd=(stable?10:4)*dt;for(const q of P){const rx=q.x-b.x,ry=q.y-b.y;q.vx+=((b.vx-b.w*ry)-q.vx)*kd;q.vy+=((b.vy+b.w*rx)-q.vy)*kd;}}
+  }
   // bookkeeping
   b.flipAng+=b.th-b.lastAng;b.lastAng=b.th;b.t+=dt;
   // settle test
@@ -184,4 +263,4 @@ const LEVELS=[
  {n:10,name:'Cap it',desc:'Finish balanced on the cap, from at least 60 cm up.',min:{drop:60},cap:true},
 ];
 function levelPasses(L,b,p){if(b.outcome==='flop')return false;if(L.minAbs){for(const k in L.minAbs){const v=k==='slope'?(p.slope||0):p[k];if(Math.abs(v)<L.minAbs[k]-1e-9)return false;}}if(L.cap&&b.outcome!=='cap')return false;if(L.minFlips&&Math.abs(b.airAng)/(2*Math.PI)<L.minFlips)return false;return true;}
-export{G,DT,makeBottle,step,judge,difficulty,LEVELS,levelPasses};
+export{FLUID,G,DT,makeBottle,step,judge,difficulty,LEVELS,levelPasses};
