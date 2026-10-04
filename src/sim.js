@@ -129,7 +129,7 @@ function step(b){
   if(contact){let lo=1e9,hi=-1e9;for(const[rx,ry]of W){const dn=(b.x+rx)*fnx+(b.y+ry)*fny;if(dn<=(b.spring?0:6e-3)){const tproj=(b.x+rx)*ftx+(b.y+ry)*fty;lo=Math.min(lo,tproj);hi=Math.max(hi,tproj);}}
     let cx=b.M*b.x,cy2=b.M*b.y,mt=b.M;for(const q of P){cx+=b.mp*q.x;cy2+=b.mp*q.y;mt+=b.mp;}cx/=mt;cy2/=mt;const ct=cx*ftx+cy2*fty;stable=ct>=lo-1e-3&&ct<=hi+1e-3;}
   b.stable=stable;
-  if(contact){const nearRest=stable&&dhyp(b.vx,b.vy)<.15&&Math.abs(b.w)<1.5;const dmp=1-(nearRest?25:2.5)*dt;
+  if(contact){const nearRest=stable&&dhyp(b.vx,b.vy)<.15&&Math.abs(b.w)<1.5;const dmp=1-(nearRest?10:2.5)*dt;
     // settle damping acts on spin and the normal component; along the slope only when friction can actually hold the bottle
     const vn=b.vx*fnx+b.vy*fny,vt=b.vx*ftx+b.vy*fty,holds=b.mu>=dtan(Math.abs(b.phi))*1.05;const dmpT=holds?dmp:1-2.5*dt;
     const vn2=vn*dmp,vt2=vt*dmpT;b.vx=vn2*fnx+vt2*ftx;b.vy=vn2*fny+vt2*fty;b.w*=dmp;
@@ -144,7 +144,9 @@ function step(b){
   const canHold=b.mu>=dtan(Math.abs(b.phi))*1.05; // on a slope steeper than friction allows, nothing is ever at rest
   const poseMoved=!b.stable||!b.touched||!canHold||Math.abs(b.th-b.poseTh)>.03||Math.abs(b.x-b.poseX)>.01||Math.abs(b.y-b.poseY)>.006;
   if(poseMoved){b.poseTh=b.th;b.poseX=b.x;b.poseY=b.y;b.settledT=0;}else b.settledT+=dt;
-  if((b.settledT>.3)||(b.touched&&b.t>b.touchT+(b.stable?1.6:4))||b.t>9||(b.x*b.fnx+b.y*b.fny)<-1){b.done=true;b.outcome=judge(b);}
+  // a bottle that still slides is not at rest yet: give it up to 4 s after touchdown, like a bottle that still rocks
+  const atRest=b.stable&&dhyp(b.vx,b.vy)<.05;
+  if((b.settledT>.3)||(b.touched&&b.t>b.touchT+(atRest?1.6:4))||b.t>9||(b.x*b.fnx+b.y*b.fny)<-1){b.done=true;b.outcome=judge(b);}
 }
 
 function judge(b){
