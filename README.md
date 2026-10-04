@@ -25,5 +25,10 @@ The same settings give the same flip in every browser, so a share link replays t
 
 ## Deploy
 
-`npm run deploy` builds and copies `dist/` with rsync to `/home/staffan/sites/bottleflip.tomtebo.org` on ludo.tomtebo.org.
-The nginx site and the TLS certificate are a one-time setup. See `deploy/setup-server.sh`.
+A push to `main` deploys the site. The GitHub Action (`.github/workflows/deploy.yml`) builds it and pushes `dist/` to the `deploy` branch.
+The push to `deploy` fires the repository webhook. The hook `update-bottleflip` on ludo.tomtebo.org then runs `deploy/update-site.sh`,
+which copies the branch to `/home/staffan/sites/bottleflip.tomtebo.org`. The update log is `/var/log/webhook-updates.log`.
+
+`npm run deploy` builds locally and copies `dist/` with rsync, without GitHub.
+
+One-time server setup: `deploy/setup-server.sh` (nginx site and TLS certificate) and `deploy/setup-webhook.sh` (the hook).
