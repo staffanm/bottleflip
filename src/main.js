@@ -88,7 +88,7 @@ function launch(){
 function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}
 
 function finish(){
-  running=false;const b=bottle,o=b.outcome,p=b.params,L=b.level;
+  running=false;bottle.endT=bottle.t;const b=bottle,o=b.outcome,p=b.params,L=b.level;
   const flips=Math.abs(b.airAng)/(2*Math.PI);
   const ok=o!=='flop';const passed=ok&&levelPasses(L,b,p);const diff=difficulty(p,o);
   const levelF=1+.3*(L.n-1);const diffRel=diff.total/DEF_DIFF*levelF;
@@ -219,7 +219,7 @@ function draw(dt){
     const bottleTopPx=(oy-(b.y+top)*scale)/dpr,bottleXFrac=(ox+b.x*scale)/W,cardBottom=42+res.offsetHeight+8;
     const clash=bottleTopPx<cardBottom;res.classList.toggle('side-right',clash&&bottleXFrac<.5);res.classList.toggle('side-left',clash&&bottleXFrac>=.5);}}
   // HUD
-  $('hudT').textContent=b.t.toFixed(2)+' s';
+  $('hudT').textContent=(b.endT??b.t).toFixed(2)+' s'; // stops at the verdict; the bottle may still slide after it
   $('hudF').textContent=(Math.abs(running?b.flipAng:(b.touched?b.airAng:b.flipAng))/(2*Math.PI)).toFixed(1)+' flips';
   if(confetti){for(const q of confetti){ctx.save();ctx.translate(q.x*W,q.y*H);ctx.rotate(q.r);ctx.fillStyle=q.c;ctx.fillRect(-4*dpr,-2.5*dpr*q.w,8*dpr,5*dpr*q.w);ctx.restore();}}
   if(finale)drawFinale(dt,W,H,dpr);
