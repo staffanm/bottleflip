@@ -127,9 +127,13 @@ function finish(){
   });
 }
 
-// After the verdict the bottle keeps moving (a slide on ice, a roll after a flop) until it comes to rest.
-// The outcome is already decided and stays as it is.
-function coast(b){const o=b.outcome;b.done=false;step(b);b.done=true;b.outcome=o;b.coastT=(b.coastT||0)+DT;
+// After the verdict the bottle keeps moving until it comes to rest. The outcome is already decided and stays as it is.
+// A flop keeps the full physics (it rolls and settles). A landing only slides along the surface, upright,
+// and friction slows it down: the full physics could still tip a bottle that the verdict counted as balanced.
+function coast(b){b.coastT=(b.coastT||0)+DT;
+  if(b.outcome==='flop'){b.done=false;step(b);b.done=true;b.outcome='flop';}
+  else{const tx=b.fny,ty=-b.fnx,dv=b.mu*G*DT;let vt=b.vx*tx+b.vy*ty;vt=Math.abs(vt)<=dv?0:vt-Math.sign(vt)*dv;
+    b.vx=vt*tx;b.vy=vt*ty;b.w=0;b.x+=b.vx*DT;b.y+=b.vy*DT;b.t+=DT;}
   if(b.coastT>8||(Math.hypot(b.vx,b.vy)<.005&&Math.abs(b.w)<.02))b.rested=true;}
 function frame(ts){
   requestAnimationFrame(frame);

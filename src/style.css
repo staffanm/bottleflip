@@ -110,3 +110,22 @@ canvas{display:block;width:100%;height:100%;touch-action:manipulation}
 .btn.quiet{background:var(--quiet);color:var(--ink);box-shadow:0 3px 0 var(--quiet-sh);font-size:12.5px;padding:8px 12px;border:1px solid var(--line)}
 .btn.quiet:active{box-shadow:0 1px 0 var(--quiet-sh)}
 .btn.quiet[aria-pressed=true]{background:var(--chip);box-shadow:0 3px 0 #b9ab8e}
+/* phones in portrait: make the controls fit the panel without scrolling, also with the level ladder shown */
+@media (max-width:859px){
+  .panel{max-height:58vh;max-height:58svh}
+  #levelBox h2{display:none}
+  .row{padding:0}
+  .row input[type=range]{height:14px}
+  .actionbar{flex-wrap:nowrap;gap:4px}
+  .actionbar .btn{padding:7px 12px;font-size:14px;white-space:nowrap}
+  .actionbar .btn.quiet{padding:7px 8px;font-size:12.5px}
+  .toggles{gap:4px}
+  .toggle{padding:4px 8px 4px 4px;gap:4px;font-size:12px;white-space:nowrap}
+  .toggle .knob{width:22px;height:14px}
+  .toggle .knob::after{width:10px;height:10px}
+  .toggle[aria-checked=true] .knob::after{transform:translateX(8px)}
+}
+@media (max-width:859px){.actionbar .btn{padding:7px 10px}.toggle{padding-right:7px}}
+/* narrow phones: the toggles show their state by colour only */
+@media (max-width:379px){.toggle .knob{display:none}.toggle{padding:5px 8px}}
+@media (max-width:339px){.actionbar{flex-wrap:wrap}}
