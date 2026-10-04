@@ -203,8 +203,11 @@ function draw(dt){
   // calm means the water moves with the bottle; the bottle itself may still slide
   {const idle=!running&&!b.touched,calm=idle||b.done||(b.touched&&b.stable&&(b.rel||0)<.15&&Math.abs(b.w)<1);
    levelMix+=((calm?1:0)-levelMix)*Math.min(1,dt*(calm?3:8));if(idle)levelMix=1;
-   if(levelMix<.995){const fl=renderFluid(b,scale);if(fl){ctx.save();ctx.globalAlpha=1-levelMix;bottlePath();ctx.clip();ctx.scale(1,-1);ctx.drawImage(fl,-R,-h,2*R,h);ctx.restore();}}
-   if(levelMix>.005&&b.parts.length){ctx.save();ctx.globalAlpha=levelMix;bottlePath();ctx.clip();drawLevelPool(b,ox,oy,scale,lw);ctx.restore();}}
+   // the particle picture hands over to the pool drawing in the first 15 % of the change, while both show the same water:
+   // the pool is drawn solid underneath and the particle picture fades out on top, so the water never looks paler
+   const hand=Math.min(1,levelMix/.15);
+   if(levelMix>.005&&b.parts.length){ctx.save();bottlePath();ctx.clip();drawLevelPool(b,ox,oy,scale,lw,levelMix);ctx.restore();}
+   if(hand<.995){const fl=renderFluid(b,scale);if(fl){ctx.save();ctx.globalAlpha=1-hand;bottlePath();ctx.clip();ctx.scale(1,-1);ctx.drawImage(fl,-R,-h,2*R,h);ctx.restore();}}}
   // shell outline + highlights
   bottlePath();ctx.lineWidth=lw;ctx.strokeStyle='rgba(30,41,59,.8)';ctx.stroke();
   ctx.fillStyle='rgba(255,255,255,.75)';ctx.beginPath();ctx.roundRect(-R*.78,h*.06,R*.14,h*.66,R*.07);ctx.fill();
@@ -241,7 +244,7 @@ function updateSlosh(b){
   s.a=Math.max(-.7,Math.min(.7,s.a));
   return s;
 }
-function drawLevelPool(b,ox,oy,scale,lw){
+function drawLevelPool(b,ox,oy,scale,lw,mix){
   const c=Math.cos(b.th),si=Math.sin(b.th);
   // the outline that bottlePath draws, with its curved shoulder, so the water fills the shoulder up to the wall
   const R=b.R,yc=b.hs+(b.h-b.hs)*.4,loc=[[-R,-b.cy],[R,-b.cy]];
@@ -257,11 +260,18 @@ function drawLevelPool(b,ox,oy,scale,lw){
   let lo=Math.min(...poly.map(p=>p[1])),hi=Math.max(...poly.map(p=>p[1]));
   for(let i=0;i<22;i++){const mid=(lo+hi)/2;if(area(clipBelow(poly,mid))<target)lo=mid;else hi=mid;}
   const yl=(lo+hi)/2,pool=clipBelow(poly,yl);if(pool.length<3)return;
+  // surface: starts as the top of the particle water and eases to the level surface as the water calms (mix 0 to 1)
+  const xs=poly.map(p=>p[0]),x0=Math.min(...xs),x1=Math.max(...xs),bot=Math.min(...poly.map(p=>p[1])),K=32,surf=[];
+  const pts=b.parts.map(q=>{const x=q.x-b.x,y=q.y-b.y;return[ca*x-sa*y,sa*x+ca*y];}),reach=b.s*.9,top=b.s*.55;
+  for(let k=0;k<=K;k++){const x=x0+(x1-x0)*k/K;let hp=-1e9;for(const[px,py]of pts)if(Math.abs(px-x)<reach&&py+top>hp)hp=py+top;surf.push([x,hp<bot?bot:hp]);}
+  for(let pass=0;pass<2;pass++)for(let k=1;k<K;k++)surf[k][1]=(surf[k-1][1]+2*surf[k][1]+surf[k+1][1])/4;
+  for(const p of surf)p[1]=yl+(1-mix)*(p[1]-yl);
   ctx.setTransform(1,0,0,1,0,0);ctx.translate(ox,oy);ctx.scale(scale,-scale);ctx.translate(b.x,b.y);ctx.rotate(-al);
-  const g=ctx.createLinearGradient(0,yl,0,Math.min(...pool.map(p=>p[1])));g.addColorStop(0,'rgba(33,133,222,.78)');g.addColorStop(1,'rgba(20,100,190,.9)');
-  ctx.beginPath();pool.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fillStyle=g;ctx.fill();
-  // meniscus line
-  ctx.strokeStyle='rgba(190,225,255,.9)';ctx.lineWidth=lw*1.2;ctx.beginPath();let first=true;for(const[x,y]of pool){if(Math.abs(y-yl)<1e-6){first?ctx.moveTo(x,y):ctx.lineTo(x,y);first=false;}}ctx.stroke();
+  const g=ctx.createLinearGradient(0,yl,0,bot);g.addColorStop(0,'rgba(33,133,222,.78)');g.addColorStop(1,'rgba(20,100,190,.9)');
+  ctx.save();ctx.beginPath();ctx.moveTo(x0-1,surf[0][1]);for(const[x,y]of surf)ctx.lineTo(x,y);ctx.lineTo(x1+1,surf[K][1]);ctx.lineTo(x1+1,bot-1);ctx.lineTo(x0-1,bot-1);ctx.closePath();ctx.clip();
+  ctx.beginPath();poly.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fillStyle=g;ctx.fill();ctx.restore();
+  // meniscus line (the bottle outline clips it to the inside)
+  ctx.strokeStyle='rgba(190,225,255,.9)';ctx.lineWidth=lw*1.2;ctx.beginPath();surf.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.stroke();
 }
 function minVertexY(b){const c=Math.cos(b.th),si=Math.sin(b.th);let m=1e9;for(const[vx,vy]of b.verts){const ry=si*vx+c*vy;if(ry<m)m=ry;}return m;}
 function drawSurface(b,W,H,dpr,scale,ox,oy){
