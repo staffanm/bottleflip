@@ -150,26 +150,23 @@ function frame(ts){
 requestAnimationFrame(frame);
 
 // ---------- fluid rendering (metaball threshold of the particle field) ----------
-// Water surface from the particles: a smooth density field (radius FR particle spacings) on a grid half a spacing wide,
-// then marching squares at level FT, which puts the surface half a spacing above the top row of resting particles.
-// The body is filled as one path with a light rim; particles outside the body (spray) are drawn as droplets.
+// Water drawn from the particles as a 2D body of water, not as dots:
+// - a smooth density field (radius FR particle spacings) on a grid half a spacing wide;
+// - each particle's blob is stretched along its motion relative to the bottle (the distance of about STREAK seconds),
+//   so moving water reads as streams and streaks;
+// - marching squares at two levels: the low level joins thin, scattered water into pale sheets, the high level FT
+//   (half a spacing above the top row of resting particles) is the solid body with a light rim.
 // No pixel read-back, so it stays cheap.
-const FR=2;
+const FR=2.5,STREAK=.02,FT_THIN=.4;
 const FT=(()=>{let sum=0;for(let k=0;k<4;k++){const ox=k/4;let f=0;
   for(let i=-8;i<=8;i++)for(let j=0;j<8;j++){const dx=i+ox,dy=.5+j,q=(dx*dx+dy*dy)/(FR*FR);if(q<1){const t=1-q;f+=t*t;}}sum+=f;}return sum/4;})();
 let field=new Float32Array(0);
-function drawFluid(b){
-  const P=b.parts,n=P.length;if(!n)return;
-  const cs=b.s*.5,pad=FR*b.s,x0=-b.R-pad,y0=-pad,nx=Math.ceil((2*b.R+2*pad)/cs)+1,ny=Math.ceil((b.h+b.hc+2*pad)/cs)+1;
-  if(field.length<nx*ny)field=new Float32Array(nx*ny);const f=field;f.fill(0,0,nx*ny);
-  const rr=FR*b.s,rr2=rr*rr,k=Math.ceil(rr/cs);
-  for(let m=0;m<n;m++){const px=P[m].lx-x0,py=P[m].ly+b.cy-y0,ci=Math.round(px/cs),cj=Math.round(py/cs);
-    for(let j=Math.max(0,cj-k);j<=Math.min(ny-1,cj+k);j++){const dy=j*cs-py;for(let i=Math.max(0,ci-k);i<=Math.min(nx-1,ci+k);i++){const dx=i*cs-px,r2=dx*dx+dy*dy;if(r2<rr2){const t=1-r2/rr2;f[j*nx+i]+=t*t;}}}}
-  const T=FT,body=new Path2D(),rim=new Path2D(),drops=new Path2D(),X=i=>x0+i*cs,Y=j=>y0+j*cs;
+// one contour level: filled region and its outline
+function contour(f,nx,ny,T,x0,y0,cs){
+  const body=new Path2D(),rim=new Path2D(),X=i=>x0+i*cs,Y=j=>y0+j*cs;
   for(let j=0;j<ny-1;j++){let run=-1;
     for(let i=0;i<nx-1;i++){const a=f[j*nx+i],bb=f[j*nx+i+1],c=f[(j+1)*nx+i+1],d=f[(j+1)*nx+i];
-      const full=a>=T&&bb>=T&&c>=T&&d>=T;
-      if(full){if(run<0)run=i;continue;}
+      if(a>=T&&bb>=T&&c>=T&&d>=T){if(run<0)run=i;continue;}
       if(run>=0){body.rect(X(run),Y(j),(i-run)*cs,cs);run=-1;}
       if(a<T&&bb<T&&c<T&&d<T)continue;
       // corners in order: bottom-left, bottom-right, top-right, top-left; crossings on the edges between them
@@ -179,12 +176,26 @@ function drawFluid(b){
       body.moveTo(poly[0],poly[1]);for(let q=2;q<poly.length;q+=2)body.lineTo(poly[q],poly[q+1]);body.closePath();
       for(let q=0;q+3<cross.length;q+=4){rim.moveTo(cross[q],cross[q+1]);rim.lineTo(cross[q+2],cross[q+3]);}}
     if(run>=0)body.rect(X(run),Y(j),(nx-1-run)*cs,cs);}
-  // spray: particles where the field is below the surface level, as droplets
-  const dr=b.s*.42;
-  for(let m=0;m<n;m++){const px=P[m].lx-x0,py=P[m].ly+b.cy-y0,i=Math.min(nx-1,Math.max(0,Math.round(px/cs))),j=Math.min(ny-1,Math.max(0,Math.round(py/cs)));
-    if(f[j*nx+i]<T){const x=P[m].lx,y=P[m].ly+b.cy;drops.moveTo(x+dr,y);drops.arc(x,y,dr,0,6.2832);}}
-  ctx.fillStyle='rgba(33,133,222,.85)';ctx.fill(body);ctx.fill(drops);
-  ctx.strokeStyle='rgba(175,222,252,.95)';ctx.lineWidth=b.s*.4;ctx.lineCap='round';ctx.stroke(rim);
+  return{body,rim};
+}
+function drawFluid(b){
+  const P=b.parts,n=P.length;if(!n)return;
+  const cs=b.s*.5,rr=FR*b.s,pad=rr*2,x0=-b.R-pad,y0=-pad,nx=Math.ceil((2*b.R+2*pad)/cs)+1,ny=Math.ceil((b.h+b.hc+2*pad)/cs)+1;
+  if(field.length<nx*ny)field=new Float32Array(nx*ny);const f=field;f.fill(0,0,nx*ny);
+  const c=Math.cos(b.th),si=Math.sin(b.th),rr2=rr*rr;
+  for(let m=0;m<n;m++){const q=P[m];
+    // velocity relative to the bottle, in the bottle's frame
+    const wx=q.x-b.x,wy=q.y-b.y,rvx=q.vx-(b.vx-b.w*wy),rvy=q.vy-(b.vy+b.w*wx),lvx=c*rvx+si*rvy,lvy=-si*rvx+c*rvy;
+    const sp=Math.hypot(lvx,lvy),st=1+Math.min(2,sp*STREAK/rr),ux=sp>1e-6?lvx/sp:1,uy=sp>1e-6?lvy/sp:0;
+    const px=q.lx-x0,py=q.ly+b.cy-y0,ext=rr*st,ci=Math.round(px/cs),cj=Math.round(py/cs),k=Math.ceil(ext/cs);
+    for(let j=Math.max(0,cj-k);j<=Math.min(ny-1,cj+k);j++){const dy=j*cs-py;
+      for(let i=Math.max(0,ci-k);i<=Math.min(nx-1,ci+k);i++){const dx=i*cs-px,along=(dx*ux+dy*uy)/st,across=-dx*uy+dy*ux,r2=along*along+across*across;
+        if(r2<rr2){const t=1-r2/rr2;f[j*nx+i]+=t*t;}}}}
+  const thin=contour(f,nx,ny,FT_THIN,x0,y0,cs),main=contour(f,nx,ny,FT,x0,y0,cs);
+  ctx.fillStyle='rgba(70,155,232,.38)';ctx.fill(thin.body);
+  ctx.strokeStyle='rgba(150,205,245,.55)';ctx.lineWidth=b.s*.3;ctx.lineCap='round';ctx.stroke(thin.rim);
+  ctx.fillStyle='rgba(33,133,222,.85)';ctx.fill(main.body);
+  ctx.strokeStyle='rgba(175,222,252,.95)';ctx.lineWidth=b.s*.4;ctx.stroke(main.rim);
 }
 
 function draw(dt){
