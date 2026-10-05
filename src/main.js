@@ -25,7 +25,7 @@ let level=LEVELS[0];
 
 function readParams(){return{h:+$('h').value/100,d:+$('d').value/100,fill:+$('f').value/100,v:+$('v').value,angle:+$('a').value,spin:+$('s').value,tilt:+$('tilt').value,drop:+$('drop').value/100,slope:+$('slope').value,surface};}
 function refreshVals(){for(const id of ids)$(id+'V').textContent=fmt[id]($(id).value);}
-function clearResult(){runId++;$('share').hidden=true;$('result').className='result';confetti=null;if(!running)$('hudS').textContent='ready';}
+function clearResult(){runId++;$('share').hidden=true;$('result').className='result';$('result').dataset.place='';confetti=null;if(!running)$('hudS').textContent='ready';}
 function viewFor(p,b){const vy0=p.v*Math.sin(p.angle*Math.PI/180),apex=Math.max(0,vy0*vy0/(2*G));return Math.max(.9,b.y+apex+b.h+.35);}
 function placeIdle(){const p=readParams();bottle=makeBottle(p);camY=bottle.y;viewH=viewFor(p,bottle);camHold=null;}
 
@@ -84,7 +84,7 @@ $('aboutBox').addEventListener('click',e=>{if(e.target.closest('.codebox'))retur
 function launch(){
   showAbout(false);runId++;const p=readParams();bottle=makeBottle(p);bottle.params=p;bottle.level=level;
   viewH=viewFor(p,bottle);
-  running=true;acc=0;confetti=null;finale=null;camHold=null;$('result').className='result';$('share').hidden=true;$('hudS').textContent='flying';
+  running=true;acc=0;confetti=null;finale=null;camHold=null;$('result').className='result';$('result').dataset.place='';$('share').hidden=true;$('hudS').textContent='flying';
 }
 function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;}}
 
@@ -103,7 +103,7 @@ function finish(){
   const diffChips=chip('level '+L.n,levelF)+chip('spin',diff.spinF)+chip('shape',diff.aspF)+chip('fill',diff.fillF)+chip('height',diff.dropF)+chip('speed',diff.speedF)+chip('surface',diff.surfF)+(diff.slopeF>1?chip('slope',diff.slopeF):'')+(o==='cap'?chip('on the cap',diff.capF):'');
   $('rChips').innerHTML=diffChips;
   $('rBest').textContent=best?`Your best so far: ${best} pts`:'';
-  $('result').className='result show';$('share').hidden=true;$('shareNote').textContent='';
+  $('result').className='result show';$('result').dataset.place='';$('share').hidden=true;$('shareNote').textContent='';
   if(passed){if(firstClear){progress.done.push(L.n);if(L.n<10)progress.unlocked=Math.max(progress.unlocked,L.n+1);saveProgress();renderLevels();
       if(L.n===10){finale={t:0,rnd:mulberry(1010),bursts:[],sparks:[]};$('rTitle').textContent+=' — all ten levels cleared!';}
       else $('rTitle').textContent+=L.n===1?' — the ladder is open: level 2 unlocked':` — level ${L.n+1} unlocked`;}
@@ -143,17 +143,22 @@ function frame(ts){
 requestAnimationFrame(frame);
 
 // ---------- fluid rendering (metaball threshold of the particle field) ----------
-// Water surface from the particles: a smooth density field on a grid half a particle spacing wide, then marching
-// squares. The inside is filled as one path and the outline is drawn as a light rim. No pixel read-back, so it stays cheap.
+// Water surface from the particles: a smooth density field (radius FR particle spacings) on a grid half a spacing wide,
+// then marching squares at level FT, which puts the surface half a spacing above the top row of resting particles.
+// The body is filled as one path with a light rim; particles outside the body (spray) are drawn as droplets.
+// No pixel read-back, so it stays cheap.
+const FR=2;
+const FT=(()=>{let sum=0;for(let k=0;k<4;k++){const ox=k/4;let f=0;
+  for(let i=-8;i<=8;i++)for(let j=0;j<8;j++){const dx=i+ox,dy=.5+j,q=(dx*dx+dy*dy)/(FR*FR);if(q<1){const t=1-q;f+=t*t;}}sum+=f;}return sum/4;})();
 let field=new Float32Array(0);
 function drawFluid(b){
   const P=b.parts,n=P.length;if(!n)return;
-  const cs=b.s*.5,x0=-b.R-cs,nx=Math.ceil((2*b.R+2*cs)/cs)+1,ny=Math.ceil((b.h+b.hc+2*cs)/cs)+1,y0=-cs;
+  const cs=b.s*.5,pad=FR*b.s,x0=-b.R-pad,y0=-pad,nx=Math.ceil((2*b.R+2*pad)/cs)+1,ny=Math.ceil((b.h+b.hc+2*pad)/cs)+1;
   if(field.length<nx*ny)field=new Float32Array(nx*ny);const f=field;f.fill(0,0,nx*ny);
-  const rr=b.s*1.25,rr2=rr*rr,k=Math.ceil(rr/cs);
+  const rr=FR*b.s,rr2=rr*rr,k=Math.ceil(rr/cs);
   for(let m=0;m<n;m++){const px=P[m].lx-x0,py=P[m].ly+b.cy-y0,ci=Math.round(px/cs),cj=Math.round(py/cs);
     for(let j=Math.max(0,cj-k);j<=Math.min(ny-1,cj+k);j++){const dy=j*cs-py;for(let i=Math.max(0,ci-k);i<=Math.min(nx-1,ci+k);i++){const dx=i*cs-px,r2=dx*dx+dy*dy;if(r2<rr2){const t=1-r2/rr2;f[j*nx+i]+=t*t;}}}}
-  const T=.75,body=new Path2D(),rim=new Path2D(),X=i=>x0+i*cs,Y=j=>y0+j*cs;
+  const T=FT,body=new Path2D(),rim=new Path2D(),drops=new Path2D(),X=i=>x0+i*cs,Y=j=>y0+j*cs;
   for(let j=0;j<ny-1;j++){let run=-1;
     for(let i=0;i<nx-1;i++){const a=f[j*nx+i],bb=f[j*nx+i+1],c=f[(j+1)*nx+i+1],d=f[(j+1)*nx+i];
       const full=a>=T&&bb>=T&&c>=T&&d>=T;
@@ -167,8 +172,12 @@ function drawFluid(b){
       body.moveTo(poly[0],poly[1]);for(let q=2;q<poly.length;q+=2)body.lineTo(poly[q],poly[q+1]);body.closePath();
       for(let q=0;q+3<cross.length;q+=4){rim.moveTo(cross[q],cross[q+1]);rim.lineTo(cross[q+2],cross[q+3]);}}
     if(run>=0)body.rect(X(run),Y(j),(nx-1-run)*cs,cs);}
-  ctx.fillStyle='rgba(33,133,222,.85)';ctx.fill(body);
-  ctx.strokeStyle='rgba(175,222,252,.95)';ctx.lineWidth=b.s*.45;ctx.lineCap='round';ctx.stroke(rim);
+  // spray: particles where the field is below the surface level, as droplets
+  const dr=b.s*.42;
+  for(let m=0;m<n;m++){const px=P[m].lx-x0,py=P[m].ly+b.cy-y0,i=Math.min(nx-1,Math.max(0,Math.round(px/cs))),j=Math.min(ny-1,Math.max(0,Math.round(py/cs)));
+    if(f[j*nx+i]<T){const x=P[m].lx,y=P[m].ly+b.cy;drops.moveTo(x+dr,y);drops.arc(x,y,dr,0,6.2832);}}
+  ctx.fillStyle='rgba(33,133,222,.85)';ctx.fill(body);ctx.fill(drops);
+  ctx.strokeStyle='rgba(175,222,252,.95)';ctx.lineWidth=b.s*.4;ctx.lineCap='round';ctx.stroke(rim);
 }
 
 function draw(dt){
@@ -219,15 +228,30 @@ function draw(dt){
   ctx.fillStyle='#e2b652';ctx.fillRect(-Rc,h,2*Rc,hc*.22);
   ctx.fillStyle='rgba(255,255,255,.18)';for(let i=0;i<4;i++)ctx.fillRect(-Rc+Rc*.3+i*Rc*.4,h+hc*.35,Rc*.1,hc*.55);
   ctx.restore();
-  // keep the result card off the bottle: top band if the bottle sits below it, otherwise the side the bottle is not on
-  {const res=$('result');if(res.classList.contains('show')){const c=Math.cos(b.th),si=Math.sin(b.th);let top=-1e9;for(const[vx,vy]of b.verts){const ry=si*vx+c*vy;if(ry>top)top=ry;}
-    const bottleTopPx=(oy-(b.y+top)*scale)/dpr,bottleXFrac=(ox+b.x*scale)/W,cardBottom=42+res.offsetHeight+8;
-    const clash=bottleTopPx<cardBottom;res.classList.toggle('side-right',clash&&bottleXFrac<.5);res.classList.toggle('side-left',clash&&bottleXFrac>=.5);}}
+  // keep the result card off the bottle
+  {const res=$('result');if(res.classList.contains('show')){const c=Math.cos(b.th),si=Math.sin(b.th);let l=1e9,r=-1e9,t=1e9,bt=-1e9;
+    for(const[vx,vy]of b.verts){const px=(ox+(b.x+c*vx-si*vy)*scale)/dpr,py=(oy-(b.y+si*vx+c*vy)*scale)/dpr;l=Math.min(l,px);r=Math.max(r,px);t=Math.min(t,py);bt=Math.max(bt,py);}
+    placeResult(res,{l:l-6,r:r+6,t:t-6,b:bt+6});}}
   // HUD
   $('hudT').textContent=(b.endT??b.t).toFixed(2)+' s'; // stops at the verdict; the bottle may still slide after it
   $('hudF').textContent=(Math.abs(running?b.flipAng:(b.touched?b.airAng:b.flipAng))/(2*Math.PI)).toFixed(1)+' flips';
   if(confetti){for(const q of confetti){ctx.save();ctx.translate(q.x*W,q.y*H);ctx.rotate(q.r);ctx.fillStyle=q.c;ctx.fillRect(-4*dpr,-2.5*dpr*q.w,8*dpr,5*dpr*q.w);ctx.restore();}}
   if(finale)drawFinale(dt,W,H,dpr);
+}
+// Result card placement: keep the current place while it leaves the bottle free; otherwise take the first place that
+// does: top, top without the detail chips, then the side away from the bottle (full, then compact). Places are measured
+// on a hidden copy of the card, at most every 150 ms, so the card never jumps back and forth or mid-transition.
+const PLACES=['','compact','side-right','side-left','side-right compact','side-left compact'];
+let placeT=0;
+function placeResult(res,box){
+  const now=performance.now();if(now-placeT<150)return;placeT=now;
+  const probe=res.cloneNode(true);probe.removeAttribute('id');probe.style.visibility='hidden';probe.style.transition='none';res.parentNode.appendChild(probe);
+  const rectFor=pl=>{probe.className='result show'+(pl?' '+pl:'');return{l:probe.offsetLeft,t:probe.offsetTop,r:probe.offsetLeft+probe.offsetWidth,b:probe.offsetTop+probe.offsetHeight};};
+  const free=pl=>{const q=rectFor(pl);return q.r<box.l||q.l>box.r||q.b<box.t||q.t>box.b;};
+  const cur=res.dataset.place||'';let pick=cur;
+  if(!free(cur)){pick=PLACES.find(free);if(pick===undefined)pick='compact';}
+  probe.remove();
+  if(pick!==cur||!res.className.endsWith(pick)){res.dataset.place=pick;res.className='result show'+(pick?' '+pick:'');}
 }
 function minVertexY(b){const c=Math.cos(b.th),si=Math.sin(b.th);let m=1e9;for(const[vx,vy]of b.verts){const ry=si*vx+c*vy;if(ry<m)m=ry;}return m;}
 function drawSurface(b,W,H,dpr,scale,ox,oy){
