@@ -135,10 +135,16 @@ function finish(){
   });
 }
 
-// After the verdict the full physics keeps running, water included, until the bottle comes to rest.
-// The outcome is already decided and stays as it is.
+// After the verdict the full physics keeps running, water included, until the bottle and the water come to rest.
+// The outcome is already decided and stays as it is. The water counts as still when its particles travel less than
+// 0.1 mm on average in 0.3 s; their velocities are no guide, because each step leaves one step of gravity in them.
 function coast(b){const o=b.outcome;b.done=false;step(b);b.done=true;b.outcome=o;b.coastT=(b.coastT||0)+DT;
-  if(b.coastT>8||(Math.hypot(b.vx,b.vy)<.005&&Math.abs(b.w)<.02&&(b.rel||0)<.01))b.rested=true;}
+  b.coastN=(b.coastN||0)+1;if(b.coastN%180)return;
+  const P=b.parts,snap=b.restSnap;let travel=0;
+  if(snap)for(let i=0;i<P.length;i++)travel+=Math.hypot(P[i].lx-snap[2*i],P[i].ly-snap[2*i+1]);
+  b.restSnap=P.flatMap(q=>[q.lx,q.ly]);
+  const still=snap&&(!P.length||travel/P.length<1e-4)&&Math.hypot(b.vx,b.vy)<.005&&Math.abs(b.w)<.02;
+  if(still||b.coastT>15)b.rested=true;}
 function frame(ts){
   requestAnimationFrame(frame);
   const dtReal=Math.min(.05,(ts-last)/1000||0);last=ts;
@@ -157,10 +163,10 @@ requestAnimationFrame(frame);
 // - marching squares at two levels: the low level joins thin, scattered water into pale sheets, the high level FT
 //   (half a spacing above the top row of resting particles) is the solid body with a light rim.
 // No pixel read-back, so it stays cheap.
-const FR=2.5,STREAK=.02,FT_THIN=.4;
+const FR=2.5,STREAK=.02,FT_THIN=.4,SPRAY=.6; // SPRAY: below this share of the body level a particle counts as spray
 const FT=(()=>{let sum=0;for(let k=0;k<4;k++){const ox=k/4;let f=0;
   for(let i=-8;i<=8;i++)for(let j=0;j<8;j++){const dx=i+ox,dy=.5+j,q=(dx*dx+dy*dy)/(FR*FR);if(q<1){const t=1-q;f+=t*t;}}sum+=f;}return sum/4;})();
-let field=new Float32Array(0);
+let field=new Float32Array(0),thinField=new Float32Array(0),spd=new Float32Array(0),dirx=spd,diry=spd;
 // one contour level: filled region and its outline
 function contour(f,nx,ny,T,x0,y0,cs){
   const body=new Path2D(),rim=new Path2D(),X=i=>x0+i*cs,Y=j=>y0+j*cs;
@@ -183,15 +189,25 @@ function drawFluid(b){
   const cs=b.s*.5,rr=FR*b.s,pad=rr*2,x0=-b.R-pad,y0=-pad,nx=Math.ceil((2*b.R+2*pad)/cs)+1,ny=Math.ceil((b.h+b.hc+2*pad)/cs)+1;
   if(field.length<nx*ny)field=new Float32Array(nx*ny);const f=field;f.fill(0,0,nx*ny);
   const c=Math.cos(b.th),si=Math.sin(b.th),rr2=rr*rr;
+  if(spd.length<n){spd=new Float32Array(n);dirx=new Float32Array(n);diry=new Float32Array(n);}
   for(let m=0;m<n;m++){const q=P[m];
     // velocity relative to the bottle, in the bottle's frame
     const wx=q.x-b.x,wy=q.y-b.y,rvx=q.vx-(b.vx-b.w*wy),rvy=q.vy-(b.vy+b.w*wx),lvx=c*rvx+si*rvy,lvy=-si*rvx+c*rvy;
-    const sp=Math.hypot(lvx,lvy),st=1+Math.min(2,sp*STREAK/rr),ux=sp>1e-6?lvx/sp:1,uy=sp>1e-6?lvy/sp:0;
+    const sp=Math.hypot(lvx,lvy),st=1+Math.min(2,sp*STREAK/rr),ux=sp>1e-6?lvx/sp:1,uy=sp>1e-6?lvy/sp:0;spd[m]=sp;dirx[m]=ux;diry[m]=uy;
     const px=q.lx-x0,py=q.ly+b.cy-y0,ext=rr*st,ci=Math.round(px/cs),cj=Math.round(py/cs),k=Math.ceil(ext/cs);
     for(let j=Math.max(0,cj-k);j<=Math.min(ny-1,cj+k);j++){const dy=j*cs-py;
       for(let i=Math.max(0,ci-k);i<=Math.min(nx-1,ci+k);i++){const dx=i*cs-px,along=(dx*ux+dy*uy)/st,across=-dx*uy+dy*ux,r2=along*along+across*across;
         if(r2<rr2){const t=1-r2/rr2;f[j*nx+i]+=t*t;}}}}
-  const thin=contour(f,nx,ny,FT_THIN,x0,y0,cs),main=contour(f,nx,ny,FT,x0,y0,cs);
+  const main=contour(f,nx,ny,FT,x0,y0,cs);
+  // the pale layer comes only from particles well outside the solid body (spray and thin sheets), so still water has none
+  if(thinField.length<nx*ny)thinField=new Float32Array(nx*ny);const g=thinField;g.fill(0,0,nx*ny);let any=false;
+  for(let m=0;m<n;m++){const q=P[m],px=q.lx-x0,py=q.ly+b.cy-y0,ci=Math.round(px/cs),cj=Math.round(py/cs);
+    if(ci<0||cj<0||ci>=nx||cj>=ny||f[cj*nx+ci]>=SPRAY*FT)continue;any=true;
+    const sp=spd[m],st=1+Math.min(2,sp*STREAK/rr),ux=sp>1e-6?dirx[m]:1,uy=sp>1e-6?diry[m]:0,ext=rr*st,k=Math.ceil(ext/cs);
+    for(let j=Math.max(0,cj-k);j<=Math.min(ny-1,cj+k);j++){const dy=j*cs-py;
+      for(let i=Math.max(0,ci-k);i<=Math.min(nx-1,ci+k);i++){const dx=i*cs-px,along=(dx*ux+dy*uy)/st,across=-dx*uy+dy*ux,r2=along*along+across*across;
+        if(r2<rr2){const t=1-r2/rr2;g[j*nx+i]+=t*t;}}}}
+  const thin=any?contour(g,nx,ny,FT_THIN,x0,y0,cs):{body:new Path2D(),rim:new Path2D()};
   ctx.fillStyle='rgba(70,155,232,.38)';ctx.fill(thin.body);
   ctx.strokeStyle='rgba(150,205,245,.55)';ctx.lineWidth=b.s*.3;ctx.lineCap='round';ctx.stroke(thin.rim);
   ctx.fillStyle='rgba(33,133,222,.85)';ctx.fill(main.body);

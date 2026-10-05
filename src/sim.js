@@ -47,7 +47,7 @@ function makeBottle(p){
   const area = p.fill*2*Ri*h, vol = p.fill*Math.PI*Ri*Ri*h, mf = 1000*vol;
   // a fixed count: the particle size follows the amount of water, so a small change of a setting is a small change of the throw
   const n = p.fill<=0?0:FLUID.N;
-  const s = n? Math.sqrt(area/n):.01, mp = n? mf/n:0, rp = s*.5;
+  const s = n? Math.sqrt(area/n):.01, mp = n? mf/n:0, rp = s*(FLUID.RP||.5);
   // kernel radius and the rest density of a square lattice at spacing s (the water's packing at rest)
   // kernel W = (h^2-r^2)^3 (poly6 without its constant), rest density and the size of the constraint gradient for a
   // particle inside a square lattice at spacing s; EPS and SCORR_K are relative to that size, so they do not depend on s
