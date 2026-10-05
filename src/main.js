@@ -30,6 +30,13 @@ function viewFor(p,b){const vy0=p.v*Math.sin(p.angle*Math.PI/180),apex=Math.max(
 function placeIdle(){const p=readParams();bottle=makeBottle(p);camY=bottle.y;viewH=viewFor(p,bottle);camHold=null;}
 
 for(const id of ids)$(id).addEventListener('input',()=>{snapAbs(id);refreshVals();cancelPress();if(!running){placeIdle();clearResult();}});
+// Sliders move only when a drag starts on the thumb: a tap elsewhere on the track (easy to hit when aiming for the
+// -/+ buttons of the setting below) does not jump the value. The thumb position assumes a thumb about 20 px wide;
+// the grab zone is 22 px either side of its centre.
+for(const id of ids){const el=$(id);
+  const offThumb=x=>{const r=el.getBoundingClientRect(),tw=20,f=(+el.value-+el.min)/(+el.max-+el.min);return Math.abs(x-(r.left+tw/2+f*(r.width-tw)))>22;};
+  el.addEventListener('mousedown',e=>{if(offThumb(e.clientX))e.preventDefault();});
+  el.addEventListener('touchstart',e=>{if(e.touches.length===1&&offThumb(e.touches[0].clientX))e.preventDefault();},{passive:false});}
 function snapAbs(id){const m=level.minAbs&&level.minAbs[id];if(!m)return;const el=$(id),v=+el.value;if(Math.abs(v)<m){el.value=(v<0||(v===0&&+(el.dataset.prev||1)<0))?-m:m;}el.dataset.prev=el.value;}
 $('result').addEventListener('click',e=>{if(e.target.closest('.share'))return;clearResult();});
 function setSurface(sf){if(level.surface&&!level.surface.includes(sf))return;surface=sf;for(const btn of $('surfaces').children)btn.classList.toggle('on',btn.dataset.s===sf);if(!running){placeIdle();clearResult();}}
