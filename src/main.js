@@ -78,7 +78,11 @@ function saveProgress(){try{localStorage.setItem('bfl-progress',JSON.stringify(p
 
 // ---------- stage / canvas ----------
 const cv=$('c'),ctx=cv.getContext('2d');
-function resize(){const r=cv.getBoundingClientRect(),dpr=window.devicePixelRatio||1;cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr);}
+// freeW: the canvas width the camera frames the bottle in. On desktop the controls cover the right side of the canvas.
+let freeW=1;
+function resize(){const r=cv.getBoundingClientRect(),dpr=window.devicePixelRatio||1;cv.width=Math.round(r.width*dpr);cv.height=Math.round(r.height*dpr);
+  const p=document.querySelector('.panel'),pr=p.getBoundingClientRect(),over=getComputedStyle(p).position==='absolute';
+  freeW=over?Math.max(cv.width*.4,(pr.left-r.left-14)*dpr):cv.width;}
 window.addEventListener('resize',resize);resize();if(window.ResizeObserver)new ResizeObserver(resize).observe(cv);
 $('flip').addEventListener('click',launch);
 document.addEventListener('keydown',e=>{if(e.code==='Space'&&e.target.tagName!=='INPUT'){e.preventDefault();launch();}if(e.key==='Escape')showAbout(false);});
@@ -220,7 +224,7 @@ function draw(dt){
   // camera planning: start the bottle off-centre, let it cross the frame, pan only as it nears the far edge, centre once it lands
   const marginPx=46*dpr;let scale,ox,oy;
   scale=zoomed?.42*H/b.h:(H-marginPx-14*dpr)/viewH;
-  const vw=W/scale;
+  const vw=freeW/scale;
   const pp=b.params||readParams(),vx0=pp.v*Math.cos(pp.angle*Math.PI/180),dir=Math.abs(vx0)<.05?0:Math.sign(vx0);
   let target;
   if(zoomed){target=b.x;}
@@ -234,7 +238,7 @@ function draw(dt){
   if(zoomed){camX=b.x;camY=b.y;camVX=0;camVY=0;} // close-up: lock dead centre on the bottle, no lag
   else{const k=30,c=2*Math.sqrt(k),amax=3*vw;let ax=k*(target-camX)-c*camVX;ax=Math.max(-amax,Math.min(amax,ax));camVX+=ax*dt;camX+=camVX*dt;camY=b.y;camVY=0;}
   if(!camInit||!isFinite(camX)){camX=target;camVX=0;camInit=true;}
-  ox=W/2-camX*scale;oy=zoomed?H*.55+camY*scale:H-marginPx;
+  ox=freeW/2-camX*scale;oy=zoomed?H*.55+camY*scale:H-marginPx;
   // backdrop grid (lab wall)
   ctx.strokeStyle='rgba(90,70,40,.07)';ctx.lineWidth=1*dpr;const gs=.1*scale;
   if(gs>8*dpr){ctx.beginPath();for(let x=ox%gs;x<W;x+=gs){ctx.moveTo(x,0);ctx.lineTo(x,Math.min(H,oy));}for(let y=oy;y>0;y-=gs){ctx.moveTo(0,y);ctx.lineTo(W,y);}ctx.stroke();}
